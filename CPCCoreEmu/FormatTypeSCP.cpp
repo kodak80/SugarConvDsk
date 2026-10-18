@@ -123,9 +123,50 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
       }
 
 
-      // Number of side :
-      new_disk->nb_sides_ = (endTrack > 42) ? 2 : 1;
-      int nbtracks = ((new_disk->nb_sides_ == 1) ? (endTrack) : (endTrack) / 2) + 1;
+      // Geometry.
+      // The SCP track table has up to 168 entries. Byte 0x0A gives the heads that were imaged :
+      // 0 = both, 1 = side 0 only, 2 = side 1 only. Most writers (SCP software for double-sided
+      // dumps, Greaseweazle always) index entries as cylinder*2+head; older single-sided dumps use
+      // a sequential index. Decide from the header and the table itself rather than assuming a
+      // 40/42-track CPC disk, so 80-84 cylinder Atari ST dumps are split correctly.
+      const int max_entries = 168;
+      unsigned int first_data = static_cast<unsigned int>(size);
+      int last_used = -1;
+      bool any_odd = false, any_even = false;
+      for (int i = 0; i < max_entries && 0x10 + i * 4 + 4 <= static_cast<int>(size); i++)
+      {
+         if (0x10 + i * 4 >= static_cast<int>(first_data)) break; // table can't overlap track data
+         unsigned int off = *((unsigned int*)(&header[0x10 + i * 4]));
+         if (off == 0 || off + 0x10 > size) continue;
+         if (off < first_data) first_data = off;
+         last_used = i;
+         if (i & 1) any_odd = true; else any_even = true;
+      }
+      if (last_used < 0) return FILE_ERROR;
+
+      bool interleaved;
+      int only_head = -1;
+      if (nb_heads == 0)
+      {
+         interleaved = true;
+      }
+      else
+      {
+         // Single head imaged : interleaved if only even (side 0) or only odd (side 1) entries are used
+         interleaved = (nb_heads == 1) ? !any_odd : !any_even;
+         only_head = nb_heads - 1;
+      }
+      if (nb_heads == 0 && any_odd && any_even && endTrack <= 42)
+      {
+         // Legacy CPC-era single-sided dump (heads byte 0, <= 43 consecutive entries) : sequential numbering,
+         // as the previous loader assumed
+         interleaved = false;
+         only_head = 0;
+      }
+
+      int nbtracks = interleaved ? (last_used / 2 + 1) : (last_used + 1);
+      // Two sides in the internal model unless only one head was imaged
+      new_disk->nb_sides_ = (interleaved && only_head == -1) ? 2 : 1;
       for (int side = 0; side < new_disk->nb_sides_; side++)
       {
          new_disk->side_[side].nb_tracks = nbtracks;
@@ -138,11 +179,11 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
       }
 
       // Track data header
-      for (int i = 0; i < 166; i++)
+      for (int i = 0; i <= last_used; i++)
       {
          tracks_header_[i].offset = *((unsigned int*)(&header[0x10 + i * 4]));
 
-         if (tracks_header_[i].offset != 0)
+         if (tracks_header_[i].offset != 0 && tracks_header_[i].offset + 0x10 <= size)
          {
             const unsigned char* track_buffer = &header[tracks_header_[i].offset];
             // Check the TRK
@@ -152,15 +193,14 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
                return -3;
             }
 
-            // Track number
-            int side = (new_disk->nb_sides_ == 1) ? 0 : (track_buffer[0x03] & 0x1);
-            unsigned int track = (new_disk->nb_sides_ == 1) ? track_buffer[0x03] : (track_buffer[0x03] >> 1);
+            // Track number (from the TRK header, which matches the table index)
+            int scp_track = track_buffer[0x03];
+            int side = (new_disk->nb_sides_ == 1) ? 0 : (scp_track & 0x1);
+            unsigned int track = interleaved ? (scp_track >> 1) : scp_track;
 
             if (track >= new_disk->side_[side].nb_tracks)
             {
-               // TODO : Do Something here !
-               int dbg = 1;
-               return -1;
+               continue; // Inconsistent entry : ignore rather than reject the whole dump
             }
 
             // Revolutions
@@ -202,7 +242,7 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
       // Adjust missing tracks :
       for (int side = 0; side < new_disk->nb_sides_; side++)
       {
-         for (int track = 0; track < 43 && track < new_disk->side_[side].nb_tracks; track++)
+         for (int track = 0; track < static_cast<int>(new_disk->side_[side].nb_tracks); track++)
          {
             if (new_disk->side_[side].tracks[track].revolution == NULL)
             {

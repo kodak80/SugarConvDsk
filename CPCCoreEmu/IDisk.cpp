@@ -117,6 +117,19 @@ IDisk::~IDisk()
    // todo ?
 }
 
+IDisk::Platform IDisk::GetPlatform()
+{
+   if (platform_ != PLATFORM_AUTO) return platform_;
+
+   // CPC 3" disks never go past 42-43 cylinders; Atari ST disks are 80-84 cylinders.
+   unsigned int max_track = 0;
+   for (int side = 0; side < nb_sides_ && side < 2; side++)
+   {
+      if (side_[side].nb_tracks > max_track) max_track = side_[side].nb_tracks;
+   }
+   return (max_track > 44) ? PLATFORM_ATARI_ST : PLATFORM_CPC;
+}
+
 
 IDisk::FaceSelection IDisk::FilterSide(IDisk::FaceSelection faceSelection)
 {

@@ -206,6 +206,7 @@ FormatType* out_support;
 IDisk::FaceSelection face_to_convert = IDisk::FACE_BOTH;
 char filter[MAX_PATH] = {0};
 char * second_side = nullptr;
+IDisk::Platform platform_override = IDisk::PLATFORM_AUTO;
 
 int ConversionFile(fs::path& source, fs::path& destination, bool use_second_side)
 {
@@ -293,6 +294,10 @@ int ConversionFile(fs::path& source, fs::path& destination, bool use_second_side
       delete new_disk_side_2;
    }
 
+   // Target platform (IPF platform field)
+   new_disk->SetPlatform(platform_override);
+   printf("%s - ", new_disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST ? "Atari ST" : "Amstrad CPC");
+
 
    // Save with the correct format
    out_support->SaveDisk(destination.string().c_str(), new_disk);
@@ -353,7 +358,7 @@ int ConversionDirectory(fs::path& source, fs::path& destination)
 
 void PrintUsage()
 {
-   printf("Usage : SugarConvDsk source [destination] [-s=side] [-second=side_2_path][-o=outputformat] [-r] [-f=filter]\n");
+   printf("Usage : SugarConvDsk source [destination] [-s=side] [-p=platform] [-second=side_2_path][-o=outputformat] [-r] [-f=filter]\n");
    printf("    or  SugarConvDsk -cat=user [-sort] [-l] [-c] source    \n");
    printf("\n");
    printf("    -s=side : Select side of the disk to convert.\n");
@@ -368,6 +373,9 @@ void PrintUsage()
    }
 
    printf("    If this parameter is not used, default output format is IPF\n");
+   printf("\n");
+   printf("    -p=platform : Target machine recorded in the output (IPF platform field). ST or CPC.\n");
+   printf("       If omitted, it is guessed from the dump : more than 44 cylinders means Atari ST.\n");
    printf("\n");
    printf("   -second=side_2_path : If source is a single dump, side 1 of side_2_path will be the 2nd side of the output (it will replace any side of the regular output)\n");
    printf("    source : The source file can be in the following format : \n");
@@ -431,6 +439,14 @@ int main(int argc, char** argv)
          else if (stricmp(argv[i], "-r") == 0)
          {
             sub_dir = true;
+         }
+         else if (stricmp(argv[i], "-p=ST") == 0)
+         {
+            platform_override = IDisk::PLATFORM_ATARI_ST;
+         }
+         else if (stricmp(argv[i], "-p=CPC") == 0)
+         {
+            platform_override = IDisk::PLATFORM_CPC;
          }
          else if (strnicmp(argv[i], "-f=", 3) == 0)
          {

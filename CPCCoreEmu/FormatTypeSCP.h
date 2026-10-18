@@ -57,6 +57,6 @@ private:
       unsigned int offset;
    } TrackDataHeader;
 
-   TrackDataHeader tracks_header_[166];
+   TrackDataHeader tracks_header_[168];
    double rpm_correction_;
 };

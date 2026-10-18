@@ -1182,7 +1182,7 @@ int CAPSFile::CreateIpf(IDisk* disk)
 {
    // Clear values
    memset(&caps_header_, 0, sizeof(caps_header_));
-   memset(&caps_info_, 0, sizeof(caps_header_));
+   memset(&caps_info_, 0, sizeof(caps_info_));
    Clear();
 
    // Now create it !
@@ -1209,10 +1209,13 @@ int CAPSFile::CreateIpf(IDisk* disk)
    caps_info_.origin_crc32 = 0; // TODO ??
    caps_info_.track_min = 0;
    caps_info_.side_min = 0;
-   caps_info_.side_max = 1; // disk->m_NbSide - 1;
+   // Single-sided ST dumps are common : record the real side count
+   const int nb_sides_out = (disk->nb_sides_ >= 2 && disk->side_[1].nb_tracks > 0) ? 2 : 1;
+   const bool atari_st = (disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST);
+   caps_info_.side_max = atari_st ? (nb_sides_out - 1) : 1; // CPC : keep historical behaviour (always 2 sides)
    caps_info_.creation_date = 0; // TODO
    caps_info_.creation_time = 0; // TODO
-   caps_info_.platform_1 = 4;
+   caps_info_.platform_1 = atari_st ? 2 : 4; // IPF platform IDs : 2 = Atari ST, 4 = Amstrad CPC
    caps_info_.disk_number = 0;
    caps_info_.creator_id = 0; // TODO
 
@@ -1226,13 +1229,13 @@ int CAPSFile::CreateIpf(IDisk* disk)
 
    for (int tr = 0; tr < maxtrack; tr++)
    {
-      for (int side = 0; side < 2/*disk->m_NbSide*/; side++)
+      for (int side = 0; side <= static_cast<int>(caps_info_.side_max); side++)
       {
          CreateData(disk, side, tr, datakey++);
       }
    }
 
-   caps_info_.track_max = disk->side_[0].nb_tracks - 1;
+   caps_info_.track_max = maxtrack - 1;
    Swap((unsigned char*)&caps_info_.header.length, caps_info_.header.length - 4);
    crc = CRC::ComputeCrc32(0xEDB88320, (unsigned char*)&caps_info_, sizeof(caps_info_));
    caps_info_.header.crc = SwapInt(crc);

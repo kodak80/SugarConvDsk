@@ -891,13 +891,13 @@ FormatTypeRAW::OperationReturn FormatTypeRAW::GetFileListFromName(const char* fi
       std::string full_path = GetFullPath(file_path);
       std::string filename = GetFileFromPath(file_path);
 
-      // Search for side / tracks. Filename should be of the form xxxx[track].[side].raw. Track si 00-41, side 0-1
+      // Search for side / tracks. Filename should be of the form xxxx[track].[side].raw. Track is 00-83 (CPC 00-41), side 0-1
       // Check last 8 characters
       if (filename.size() > 8)
       {
          std::string last_part = filename.substr(filename.size() - 8, 8);
          int track, side;
-         if (sscanf(last_part.c_str(), "%i.%i.", &track, &side) != 2)
+         if (sscanf(last_part.c_str(), "%d.%d.", &track, &side) != 2) // %d, not %i : "08" must not parse as octal
          {
             // Pattern not found
             return FILE_ERROR;

@@ -59,6 +59,17 @@ public:
       FACE_BOTH = 3,
    };
 
+   // Target machine, used by writers that record it (IPF platform field, gap defaults)
+   enum Platform
+   {
+      PLATFORM_AUTO = 0,
+      PLATFORM_CPC,
+      PLATFORM_ATARI_ST
+   };
+   void SetPlatform(Platform platform) { platform_ = platform; }
+   // Explicit platform if set, otherwise a guess from the disk geometry
+   Platform GetPlatform();
+
    typedef enum
    {
       AUTO_UNKNOWN = 0,
@@ -139,6 +150,7 @@ public:
    virtual int CreateUnformattedTrack(int side, int track);
 
    unsigned char nb_sides_;
+   Platform platform_ = PLATFORM_AUTO;
    ILog* log_;
 
    // Used for EDSK saving
