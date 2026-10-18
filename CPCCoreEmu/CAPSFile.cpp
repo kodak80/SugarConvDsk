@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "CAPSFile.h"
+#include <algorithm>
+#include <vector>
 
 #include "CRC.h"
 #include "FDC765.h"
@@ -985,7 +987,7 @@ int CAPSFile::DecompressData(IDisk* disk, DWORD ctype, DWORD cyl, DWORD head, Da
          unsigned short* cell_ns = new unsigned short[nb_cells];
          for (unsigned int c = 0; c < nb_cells; c++)
          {
-            unsigned int d = density[std::min(c / 8, nb_density - 1)];
+            unsigned int d = density[(std::min)(c / 8, nb_density - 1)];
             cell_ns[c] = static_cast<unsigned short>(d * 125); // 16 -> 2000 ns
          }
          IDisk::MeasureSectorDensity(mfm, mfm.revolution[0].bitfield, nb_cells, cell_ns);

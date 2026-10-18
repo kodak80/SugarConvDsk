@@ -20,7 +20,11 @@
 #define _CRTDBG_MAP_ALLOC
 
 #include <filesystem>
-namespace fs = std::experimental::filesystem;
+#if defined(_MSC_VER) && _MSVC_LANG >= 201703L
+namespace fs = std::filesystem;               // current Visual Studio : C++17 filesystem
+#else
+namespace fs = std::experimental::filesystem; // Visual Studio 2017
+#endif
 
 #elif __MORPHOS__
 // fs does not exist there
