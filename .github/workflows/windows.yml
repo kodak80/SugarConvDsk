@@ -13,9 +13,17 @@ jobs:
         with:
           submodules: true
       - name: Configure
-        run: cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+        shell: bash
+        run: |
+          cmake -S . -B build -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded > configure.log 2>&1 || {
+            grep -iE "error|warning" configure.log | head -15 | while read -r l; do echo "::error::$l"; done
+            exit 1; }
       - name: Build
-        run: cmake --build build --config Release --target SugarConvDsk
+        shell: bash
+        run: |
+          cmake --build build --config Release --target SugarConvDsk > build.log 2>&1 || {
+            grep -E "error" build.log | head -15 | while read -r l; do echo "::error::$l"; done
+            exit 1; }
       - name: Smoke test
         shell: bash
         run: ./build/SugarConvDsk/Release/SugarConvDsk.exe | head -5 || true
