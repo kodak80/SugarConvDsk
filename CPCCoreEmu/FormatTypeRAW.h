@@ -56,6 +56,8 @@ public:
 private:
    FormatTypeRAW::OperationReturn GetFileListFromName(const char* file_path, std::vector<TrackItem>& file_list);
    unsigned int ComputeTrack(int index, IDisk::Revolution* revolution);
+   unsigned short* cell_ns_ = nullptr;          // per-cell PLL clock (ns), when measuring
+   IDisk::MFMTrack* cell_ns_track_ = nullptr;   // track receiving the density measurement
    bool CreateDiskStructureFromFileList(std::vector<TrackItem> file_list, IDisk*& created_disk);
    bool GetDiskFromFilename(const char* filename, unsigned int& side, unsigned int& track);
 

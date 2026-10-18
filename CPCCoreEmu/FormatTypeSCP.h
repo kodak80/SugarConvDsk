@@ -50,7 +50,7 @@ public:
 
 private:
    unsigned int ComputeTrack(unsigned char* bitfield, const unsigned char* cellbuffer, int size_of_buffer,
-                             int duration);
+                             int duration, unsigned short* cell_ns = nullptr);
 
    typedef struct
    {

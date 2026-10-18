@@ -117,17 +117,81 @@ IDisk::~IDisk()
    // todo ?
 }
 
+void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, unsigned int nb_bits,
+                                 const unsigned short* cell_ns)
+{
+   track.nb_sector_density = 0;
+   if (bits == nullptr || cell_ns == nullptr || nb_bits < 64) return;
+
+   static const unsigned short sync = 0x4489; // A1 with missing clock
+   auto word_at = [&](unsigned int p)
+   {
+      unsigned short w = 0;
+      for (unsigned int i = 0; i < 16; i++) w = (w << 1) | (bits[p + i] == 1 ? 1 : 0);
+      return w;
+   };
+   auto byte_at = [&](unsigned int p) // data bits are the odd cells of an MFM word
+   {
+      unsigned char b = 0;
+      for (unsigned int i = 0; i < 8; i++) b = (b << 1) | (bits[p + i * 2 + 1] == 1 ? 1 : 0);
+      return b;
+   };
+
+   double mean[32];
+   int nb = 0;
+   unsigned int size_code = 2;
+   for (unsigned int p = 0; p + 64 < nb_bits && nb < 32; p++)
+   {
+      if (word_at(p) != sync || word_at(p + 16) != sync || word_at(p + 32) != sync) continue;
+      unsigned int mark_pos = p + 48;
+      unsigned char mark = byte_at(mark_pos);
+      if (mark == 0xFE && mark_pos + 16 * 5 < nb_bits)
+      {
+         size_code = byte_at(mark_pos + 16 * 4) & 3;
+      }
+      else if (mark == 0xFB || mark == 0xF8)
+      {
+         unsigned int start = mark_pos + 16;
+         unsigned int end = start + (128u << size_code) * 16;
+         if (end > nb_bits) end = nb_bits;
+         if (end > start + 256)
+         {
+            double sum = 0;
+            for (unsigned int c = start; c < end; c++) sum += cell_ns[c];
+            mean[nb++] = sum / (end - start);
+         }
+      }
+      p = mark_pos;
+   }
+   if (nb == 0) return;
+
+   double sorted[32];
+   memcpy(sorted, mean, sizeof(double) * nb);
+   std::sort(sorted, sorted + nb);
+   double median = sorted[nb / 2];
+   for (int i = 0; i < nb; i++)
+   {
+      track.sector_density[i] = static_cast<short>((mean[i] / median - 1.0) * 1000.0);
+   }
+   track.nb_sector_density = static_cast<unsigned char>(nb);
+   if (getenv("SUGARCONV_DEBUG_DENSITY"))
+   {
+      printf("\n density median %.1f ns :", median);
+      for (int i = 0; i < nb; i++) printf(" %+d", track.sector_density[i]);
+   }
+}
+
 IDisk::Platform IDisk::GetPlatform()
 {
    if (platform_ != PLATFORM_AUTO) return platform_;
 
-   // CPC 3" disks never go past 42-43 cylinders; Atari ST disks are 80-84 cylinders.
+   // CPC 3" disks stay under ~46 cylinders (some protected ones use 44-45); Atari ST disks are 80-84.
    unsigned int max_track = 0;
    for (int side = 0; side < nb_sides_ && side < 2; side++)
    {
       if (side_[side].nb_tracks > max_track) max_track = side_[side].nb_tracks;
    }
-   return (max_track > 44) ? PLATFORM_ATARI_ST : PLATFORM_CPC;
+   return (max_track > 60) ? PLATFORM_ATARI_ST : PLATFORM_CPC;
 }
 
 

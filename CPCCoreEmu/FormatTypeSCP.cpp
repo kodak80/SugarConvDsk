@@ -156,7 +156,8 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
          interleaved = (nb_heads == 1) ? !any_odd : !any_even;
          only_head = nb_heads - 1;
       }
-      if (nb_heads == 0 && any_odd && any_even && endTrack <= 42)
+      const bool atari_st_type = (diskType == 0x14 || diskType == 0x15); // SCP disk types : Atari ST SS / DS
+      if (nb_heads == 0 && any_odd && any_even && endTrack <= 42 && !atari_st_type)
       {
          // Legacy CPC-era single-sided dump (heads byte 0, <= 43 consecutive entries) : sequential numbering,
          // as the previous loader assumed
@@ -227,8 +228,15 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
                // Fill the bitfield
                new_disk->side_[side].tracks[track].revolution[revolution].bitfield = new unsigned char[new_disk->side_[
                   side].tracks[track].revolution[revolution].size];
-               new_disk->side_[side].tracks[track].revolution[revolution].size = ComputeTrack(
-                  new_disk->side_[side].tracks[track].revolution[revolution].bitfield, cellbuffer, length, duration);
+               IDisk::Revolution& rev = new_disk->side_[side].tracks[track].revolution[revolution];
+               unsigned short* cell_ns = (revolution == 0) ? new unsigned short[rev.size] : nullptr;
+               rev.size = ComputeTrack(rev.bitfield, cellbuffer, length, duration, cell_ns);
+               if (cell_ns != nullptr)
+               {
+                  // Keep cell timing of the first revolution (Copylock ST and other density protections)
+                  IDisk::MeasureSectorDensity(new_disk->side_[side].tracks[track], rev.bitfield, rev.size, cell_ns);
+                  delete[] cell_ns;
+               }
             }
 
             //AdjustLength ( m_Disk[side].Tracks[track].Revolution, numRevolution);
@@ -479,7 +487,7 @@ int FormatTypeSCP::SaveDisk(const char* file_path, IDisk* disk, ILoadingProgress
 }
 
 unsigned int FormatTypeSCP::ComputeTrack(unsigned char* bitfield, const unsigned char* cellbuffer, int sizeOfBuffer,
-                                         int duration)
+                                         int duration, unsigned short* cell_ns)
 {
 #define CLOCK_MAX_ADJ 10     /* +/- 10% adjustment */
 #define CLOCK_MIN(_c) (((_c) * (100 - CLOCK_MAX_ADJ)) / 100)
@@ -514,7 +522,8 @@ unsigned int FormatTypeSCP::ComputeTrack(unsigned char* bitfield, const unsigned
             }
          }
 
-         time += nb_bytes * 0xFFFF;
+         // Each zero entry is a 16-bit counter overflow : 65536 ticks of 25 ns
+         time += nb_bytes * 0x10000 * 25;
          i += 2;
          flux += time;
          clocked_zeros = 0;
@@ -527,6 +536,7 @@ unsigned int FormatTypeSCP::ComputeTrack(unsigned char* bitfield, const unsigned
       if (flux >= clock / 2)
       {
          if (bitfield != NULL) bitfield[nb_bits_in_flux] = 0;
+         if (cell_ns != NULL) cell_ns[nb_bits_in_flux] = static_cast<unsigned short>(clock);
          clocked_zeros++;
          nb_bits_in_flux++;
       }
@@ -536,6 +546,7 @@ unsigned int FormatTypeSCP::ComputeTrack(unsigned char* bitfield, const unsigned
          if (i + 1 < sizeOfBuffer * 2)
          {
             if (bitfield != NULL) bitfield[nb_bits_in_flux] = 1;
+            if (cell_ns != NULL) cell_ns[nb_bits_in_flux] = static_cast<unsigned short>(clock);
             nb_bits_in_flux++;
          }
 

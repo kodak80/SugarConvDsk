@@ -4,7 +4,7 @@
 [![Build Status](https://travis-ci.com/Tom1975/SugarConvDsk.svg?branch=master)](https://travis-ci.com/Tom1975/SugarConvDsk)
 [![Build status](https://ci.appveyor.com/api/projects/status/oq746hdj4wrn8rod?svg=true)](https://ci.appveyor.com/project/Tom1975/sugarconvdsk)
 
-Convert any Amstrad CPC dump file format to other format
+Convert any Amstrad CPC or Atari ST dump file format to other format
 
 Usage
 =====
@@ -18,6 +18,9 @@ Usage : SugarConvDsk source [destination] [-s=side] [-second=path][-o=outputform
        If omitted, both side are written (if relevant for the format)
     
     -second=path : the 2nd side is replaced by the dump source specified in 'path'
+
+    -p=platform : Target machine recorded in the output (IPF platform field) : ST or CPC.
+       If omitted, it is guessed from the dump : more than 60 cylinders means Atari ST.
 
     -o=outputformat : Select output format. Can take the following values:
         EDSK : Extended Dsk format
@@ -60,6 +63,25 @@ Usage : SugarConvDsk source [destination] [-s=side] [-second=path][-o=outputform
 This tool mainly convert any format into an internal format, then write it back to the specified one.
 Internal format is bases on MFM, with some specific attributes for every bit, which can be weak or optional.
 The internal format is also not revolution-dependant : If a dump use more than one revolution, to keep track of weak sector for example, a specific algorithm will rebuild a single track from these revolutions, adding the attributes needed to describe everything. Also, an error correction is done, to avoid being fooled by reading error.
+
+Atari ST
+========
+Flux dumps (SCP, KryoFlux RAW stream sets, CT-RAW) of Atari ST disks can be converted to IPF :
+
+	SugarConvDsk "Dungeon Master.scp" -o=IPF
+	SugarConvDsk dump/track00.0.raw -o=IPF -p=ST
+
+ - 80 to 84 cylinders, single or double sided. For SCP, the sides come from the header's heads byte,
+   and both the interleaved (cylinder*2+head) and sequential single-sided track tables are handled.
+ - 9, 10 and 11 sector formats, long tracks.
+ - IPF output records the Atari ST platform and the real number of sides.
+ - Copylock ST : the cell timing of each sector is measured from the flux. When the 6th sector is
+   ~5% slower than the others, the track is written with the IPF "Copylock ST" density so emulators
+   using the SPS library reproduce it. Set SUGARCONV_DEBUG_DENSITY=1 to print per-sector timings.
+ - Weak / fuzzy sectors are kept as fuzzy data.
+
+Tests/AtariST contains a flux generator for synthetic ST disks and an IPF checker based on the SPS
+capsimage library ; run_tests.sh runs the whole set.
 
 Compilation
 =

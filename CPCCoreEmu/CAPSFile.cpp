@@ -1813,6 +1813,7 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
    unsigned int current_recored_offset = 0;
 
    unsigned char pattern_byte[16];
+   bool starts_with_iam = false;
 
    if (!abort)
    {
@@ -1820,6 +1821,7 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
       search_offset = FindNextPattern(track_field, disk->side_[side].tracks[tr].size, search_offset, pPatternC2, 6);
       if (search_offset != -1)
       {
+         starts_with_iam = true;
          imge_item.start_bit_pos = (search_offset != -1) ? search_offset : 0;
          imge_item.start_byte_pos = imge_item.start_bit_pos / 8;
       }
@@ -1979,6 +1981,27 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
    // End of track (or unformatted ones !)
    // TODO
    //End:
+
+   // Copylock ST : the 6th sector of the track is written with ~5% longer cells, all others nominal.
+   // The SPS library reproduces it from density type 5 (it slows down block 5), so flag the track
+   // when the measured flux timing matches that layout.
+   if (!abort && disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST)
+   {
+      const IDisk::MFMTrack& mfm = disk->side_[side].tracks[tr];
+      const int slow = 5 - (starts_with_iam ? 1 : 0); // physical data field that lands in block 5
+      if (mfm.nb_sector_density > slow && slow >= 0 && imge_item.block_count > 5)
+      {
+         bool others_nominal = true;
+         for (int i = 0; i < mfm.nb_sector_density; i++)
+         {
+            if (i != slow && abs(mfm.sector_density[i]) > 20) others_nominal = false;
+         }
+         if (others_nominal && mfm.sector_density[slow] >= 25 && mfm.sector_density[slow] <= 90)
+         {
+            imge_item.density = 5; // Copylock ST
+         }
+      }
+   }
 
    // End : Now compile every descriptor, then every datas ( ).
    // dataoffset and gapoffsets

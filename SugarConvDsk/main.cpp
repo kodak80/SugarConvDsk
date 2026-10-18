@@ -375,7 +375,7 @@ void PrintUsage()
    printf("    If this parameter is not used, default output format is IPF\n");
    printf("\n");
    printf("    -p=platform : Target machine recorded in the output (IPF platform field). ST or CPC.\n");
-   printf("       If omitted, it is guessed from the dump : more than 44 cylinders means Atari ST.\n");
+   printf("       If omitted, it is guessed from the dump : more than 60 cylinders means Atari ST.\n");
    printf("\n");
    printf("   -second=side_2_path : If source is a single dump, side 1 of side_2_path will be the 2nd side of the output (it will replace any side of the regular output)\n");
    printf("    source : The source file can be in the following format : \n");

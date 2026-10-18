@@ -1,4 +1,4 @@
-Usage : SugarConvDsk source [destination] [-s=side] [-second=side_2_path][-o=outputformat] [-r] [-f=filter]
+Usage : SugarConvDsk source [destination] [-s=side] [-p=platform] [-second=side_2_path][-o=outputformat] [-r] [-f=filter]
     or  SugarConvDsk -cat=user [-sort] [-l] [-c] source    
 
     -s=side : Select side of the disk to convert.
@@ -11,6 +11,9 @@ Usage : SugarConvDsk source [destination] [-s=side] [-second=side_2_path][-o=out
         IPF : IPF format
         SCP : Supercard Pro format
     If this parameter is not used, default output format is IPF
+
+    -p=platform : Target machine recorded in the output (IPF platform field). ST or CPC.
+       If omitted, it is guessed from the dump : more than 60 cylinders means Atari ST.
 
    -second=side_2_path : If source is a single dump, side 1 of side_2_path will be the 2nd side of the output (it will replace any side of the regular output)
     source : The source file can be in the following format : 

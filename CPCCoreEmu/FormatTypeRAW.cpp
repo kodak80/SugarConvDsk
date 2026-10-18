@@ -502,10 +502,12 @@ int FormatTypeRAW::ComputeTrack(IDisk*& created_disk, int side, int track)
    created_disk->side_[side].tracks[track].revolution = new IDisk::Revolution[(indexNumber - 1)];
    created_disk->side_[side].tracks[track].nb_revolutions = indexNumber - 1;
 
+   cell_ns_track_ = &created_disk->side_[side].tracks[track];
    for (int index_revolution = 0; index_revolution < (indexNumber - 1); index_revolution++)
    {
       DecodeFluxFromIndex(index_revolution, created_disk->side_[side].tracks[track].revolution);
    }
+   cell_ns_track_ = nullptr;
    return 0;
 }
 
@@ -529,6 +531,16 @@ unsigned int FormatTypeRAW::DecodeFluxFromIndex(int index, IDisk::Revolution* re
    revolution[index].size = ComputeTrack(index, NULL);
    revolution[index].bitfield = new unsigned char[revolution[index].size];
 
+   if (cell_ns_track_ != nullptr && index == 0)
+   {
+      // First revolution : keep the cell timing to detect density protections (Copylock ST)
+      cell_ns_ = new unsigned short[revolution[index].size];
+      revolution[index].size = ComputeTrack(index, revolution);
+      IDisk::MeasureSectorDensity(*cell_ns_track_, revolution[index].bitfield, revolution[index].size, cell_ns_);
+      delete[] cell_ns_;
+      cell_ns_ = nullptr;
+      return revolution[index].size;
+   }
    return revolution[index].size = ComputeTrack(index, revolution);
 }
 
@@ -639,6 +651,7 @@ unsigned int FormatTypeRAW::ComputeTrack(int index, IDisk::Revolution* revolutio
       if (flux >= clock / 2)
       {
          if (revolution != NULL) revolution[index].bitfield[nb_bit_in_flux] = 0;
+         if (revolution != NULL && cell_ns_ != nullptr) cell_ns_[nb_bit_in_flux] = static_cast<unsigned short>(clock);
          clocked_zeros++;
          nb_bit_in_flux++;
       }
@@ -646,6 +659,7 @@ unsigned int FormatTypeRAW::ComputeTrack(int index, IDisk::Revolution* revolutio
       {
          // Otherwise, we have a one
          if (revolution != NULL) revolution[index].bitfield[nb_bit_in_flux] = 1;
+         if (revolution != NULL && cell_ns_ != nullptr) cell_ns_[nb_bit_in_flux] = static_cast<unsigned short>(clock);
          nb_bit_in_flux++;
 
          // PLL computations HERE !
@@ -678,6 +692,7 @@ unsigned int FormatTypeRAW::ComputeTrack(int index, IDisk::Revolution* revolutio
       if (flux >= clock / 2)
       {
          if (revolution != NULL) revolution[index].bitfield[nb_bit_in_flux] = 0;
+         if (revolution != NULL && cell_ns_ != nullptr) cell_ns_[nb_bit_in_flux] = static_cast<unsigned short>(clock);
          clocked_zeros++;
          nb_bit_in_flux++;
       }
@@ -691,6 +706,7 @@ unsigned int FormatTypeRAW::ComputeTrack(int index, IDisk::Revolution* revolutio
          {
             // To check
             if (revolution != NULL) revolution[index].bitfield[nb_bit_in_flux] = 1;
+         if (revolution != NULL && cell_ns_ != nullptr) cell_ns_[nb_bit_in_flux] = static_cast<unsigned short>(clock);
             nb_bit_in_flux++;
          }
       }

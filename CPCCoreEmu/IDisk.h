@@ -268,7 +268,16 @@ public:
       // These data are final data. Revolution will disapear !
       unsigned char* bitfield;
       unsigned int size;
+      // Cell timing of each data field, in physical order from the index, as a per-mille deviation
+      // from the track's median cell length (+50 = cells 5% longer). Filled by flux loaders only.
+      short sector_density[32];
+      unsigned char nb_sector_density;
    } MFMTrack;
+
+   // Measure the cell length of every data field of a decoded flux revolution.
+   // bits : one cell per byte (0/1), cell_ns : PLL cell length for each of those cells (ns).
+   static void MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, unsigned int nb_bits,
+                                    const unsigned short* cell_ns);
 
    // MFM Tracks
    typedef struct
