@@ -78,7 +78,13 @@ Flux dumps (SCP, KryoFlux RAW stream sets, CT-RAW) of Atari ST disks can be conv
  - Copylock ST : the cell timing of each sector is measured from the flux. When the 6th sector is
    ~5% slower than the others, the track is written with the IPF "Copylock ST" density so emulators
    using the SPS library reproduce it. Set SUGARCONV_DEBUG_DENSITY=1 to print per-sector timings.
- - Weak / fuzzy sectors are kept as fuzzy data.
+ - Copylock ST is detected from SCP, KryoFlux and CT-RAW (CT-RAW uses its own density map).
+ - Fuzzy sectors (Dungeon Master...) : every cell of a data field that is not stable across the dumped
+   revolutions is written as fuzzy, so each read returns different data with a bad CRC.
+ - Unstable cells around the write splice (in the gap after the last sector) are dump noise and are
+   written as plain gap, matching SPS images.
+ Checked against real dumps : Defender II CT-RAW gives sector data, Copylock ST density and weak areas
+ identical to the SPS IPF ; King's Quest 3 (3 disks) KryoFlux and CT-RAW give identical IPFs.
 
 Tests/AtariST contains a flux generator for synthetic ST disks and an IPF checker based on the SPS
 capsimage library ; run_tests.sh runs the whole set.

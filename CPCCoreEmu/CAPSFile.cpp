@@ -966,11 +966,33 @@ int CAPSFile::DecompressData(IDisk* disk, DWORD ctype, DWORD cyl, DWORD head, Da
    offset += 4;
 
    // First pack is density information
-   ExtractDensity(&imageItem.buffer[offset], density_buf_size, ctype, cyl, head);
+   unsigned int* density = ExtractDensity(&imageItem.buffer[offset], density_buf_size, ctype, cyl, head);
+   unsigned int nb_density = ExtractInt(&imageItem.buffer[offset + 4]) >> 2;
    offset += density_buf_size;
 
    // Second one is track informations
    ExtractTrack(disk, &imageItem.buffer[offset], track_buf_size, ctype, cyl, head);
+
+   // The density pack holds one value per MFM byte (8 cells) of the first revolution, 16 = nominal
+   // 2us cells. Turn it into per-cell timing so density protections (Copylock ST) are detected
+   // exactly as for SCP / KryoFlux dumps.
+   if (head < 2 && cyl < disk->side_[head].nb_tracks && disk->side_[head].tracks[cyl].nb_revolutions > 0)
+   {
+      IDisk::MFMTrack& mfm = disk->side_[head].tracks[cyl];
+      unsigned int nb_cells = mfm.revolution[0].size;
+      if (nb_density > 0 && nb_cells > 0)
+      {
+         unsigned short* cell_ns = new unsigned short[nb_cells];
+         for (unsigned int c = 0; c < nb_cells; c++)
+         {
+            unsigned int d = density[std::min(c / 8, nb_density - 1)];
+            cell_ns[c] = static_cast<unsigned short>(d * 125); // 16 -> 2000 ns
+         }
+         IDisk::MeasureSectorDensity(mfm, mfm.revolution[0].bitfield, nb_cells, cell_ns);
+         delete[] cell_ns;
+      }
+   }
+   delete[] density;
 
    return 0;
 }
@@ -1853,6 +1875,40 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
       memcpy(&track_field[disk->side_[side].tracks[tr].size - imge_item.start_bit_pos],
              disk->side_[side].tracks[tr].bitfield, imge_item.start_bit_pos);
 
+      // Atari ST : a few unstable cells around the write splice (in the gap after the last data field)
+      // are dump noise, not a protection. Keep them as plain gap so the track matches SPS images.
+      if (disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST)
+      {
+         const unsigned int n = disk->side_[side].tracks[tr].size;
+         std::vector<std::pair<unsigned int, unsigned int>> fields;
+         IDisk::FindDataFields(track_field, n, fields);
+         unsigned int last_data_end = fields.empty() ? n : fields.back().second;
+         for (unsigned int b = last_data_end; b < n; b++)
+         {
+            if (track_field[b] <= 1) continue;
+            unsigned int e = b;
+            while (e < n && track_field[e] > 1) e++;
+            if (e - b <= 16)
+            {
+               for (unsigned int c = b; c < e; c++) track_field[c] &= 1;
+            }
+            b = e;
+         }
+      }
+      if (getenv("SUGARCONV_DEBUG_WEAK"))
+      {
+         unsigned int n = disk->side_[side].tracks[tr].size;
+         for (unsigned int b = 0; b < n; b++)
+         {
+            if (track_field[b] > 1)
+            {
+               unsigned int e = b;
+               while (e < n && track_field[e] > 1) e++;
+               printf("\n weak %02u.%d : cells %u-%u (len %u) of %u", tr, side, b, e, e - b, n);
+               b = e;
+            }
+         }
+      }
       search_offset = 0;
       int initial_backward_gap = 0;
       unsigned int offset_gap = disk->side_[side].tracks[tr].size - 16;

@@ -117,30 +117,28 @@ IDisk::~IDisk()
    // todo ?
 }
 
-void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, unsigned int nb_bits,
-                                 const unsigned short* cell_ns)
+void IDisk::FindDataFields(const unsigned char* bits, unsigned int nb_bits,
+                           std::vector<std::pair<unsigned int, unsigned int>>& fields)
 {
-   track.nb_sector_density = 0;
-   if (bits == nullptr || cell_ns == nullptr || nb_bits < 64) return;
+   fields.clear();
+   if (bits == nullptr || nb_bits < 64) return;
 
    static const unsigned short sync = 0x4489; // A1 with missing clock
    auto word_at = [&](unsigned int p)
    {
       unsigned short w = 0;
-      for (unsigned int i = 0; i < 16; i++) w = (w << 1) | (bits[p + i] == 1 ? 1 : 0);
+      for (unsigned int i = 0; i < 16; i++) w = (w << 1) | ((bits[p + i] & 1) ? 1 : 0);
       return w;
    };
    auto byte_at = [&](unsigned int p) // data bits are the odd cells of an MFM word
    {
       unsigned char b = 0;
-      for (unsigned int i = 0; i < 8; i++) b = (b << 1) | (bits[p + i * 2 + 1] == 1 ? 1 : 0);
+      for (unsigned int i = 0; i < 8; i++) b = (b << 1) | ((bits[p + i * 2 + 1] & 1) ? 1 : 0);
       return b;
    };
 
-   double mean[32];
-   int nb = 0;
    unsigned int size_code = 2;
-   for (unsigned int p = 0; p + 64 < nb_bits && nb < 32; p++)
+   for (unsigned int p = 0; p + 64 < nb_bits; p++)
    {
       if (word_at(p) != sync || word_at(p + 16) != sync || word_at(p + 32) != sync) continue;
       unsigned int mark_pos = p + 48;
@@ -152,16 +150,103 @@ void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, uns
       else if (mark == 0xFB || mark == 0xF8)
       {
          unsigned int start = mark_pos + 16;
-         unsigned int end = start + (128u << size_code) * 16;
+         unsigned int end = start + ((128u << size_code) + 2) * 16; // data + CRC
          if (end > nb_bits) end = nb_bits;
-         if (end > start + 256)
-         {
-            double sum = 0;
-            for (unsigned int c = start; c < end; c++) sum += cell_ns[c];
-            mean[nb++] = sum / (end - start);
-         }
+         fields.emplace_back(start, end);
       }
       p = mark_pos;
+   }
+}
+
+// Fuzzy sectors (Dungeon Master, ...) : some cells of a data field read differently on every
+// revolution, scattered over the sector. The generic merge only flags the spots where it lost sync,
+// so compare each data field cell by cell across all revolutions and flag every cell that is not
+// stable as weak. Only done when the field has the same length in every revolution, so cells line up.
+void IDisk::MarkFuzzyDataFields(int side, int track)
+{
+   MFMTrack& t = side_[side].tracks[track];
+   if (t.nb_revolutions < 2 || t.bitfield == nullptr) return;
+
+   std::vector<std::pair<unsigned int, unsigned int>> merged;
+   FindDataFields(t.bitfield, t.size, merged);
+   std::vector<std::vector<std::pair<unsigned int, unsigned int>>> per_rev(t.nb_revolutions);
+   for (unsigned int r = 0; r < t.nb_revolutions; r++)
+   {
+      FindDataFields(t.revolution[r].bitfield, t.revolution[r].size, per_rev[r]);
+      if (per_rev[r].size() != merged.size()) return; // layouts differ : leave the merge alone
+   }
+
+   for (size_t k = 0; k < merged.size(); k++)
+   {
+      const unsigned int len = merged[k].second - merged[k].first;
+      bool aligned = true;
+      for (unsigned int r = 0; r < t.nb_revolutions && aligned; r++)
+      {
+         if (per_rev[r][k].second - per_rev[r][k].first != len) aligned = false;
+      }
+      if (!aligned) continue;
+
+      // Compare 16-cell words. A revolution may slip by a cell or two inside a fuzzy area (the PLL or
+      // the dumping software resyncs differently), so each revolution keeps its own small offset,
+      // re-locked whenever a shifted word matches the reference exactly.
+      const unsigned char* ref = &t.revolution[0].bitfield[per_rev[0][k].first];
+      std::vector<int> shift(t.nb_revolutions, 0);
+      auto cell = [&](unsigned int r, int pos) -> int
+      {
+         const IDisk::Revolution& rv = t.revolution[r];
+         int p = static_cast<int>(per_rev[r][k].first) + pos;
+         if (p < 0 || p >= static_cast<int>(rv.size)) return -1;
+         return rv.bitfield[p] & 1;
+      };
+      for (unsigned int w = 0; w + 16 <= len; w += 16)
+      {
+         unsigned int unstable_mask = 0;
+         for (unsigned int r = 1; r < t.nb_revolutions; r++)
+         {
+            auto mismatch = [&](int sh)
+            {
+               unsigned int m = 0;
+               for (unsigned int c = 0; c < 16; c++)
+                  if (cell(r, static_cast<int>(w + c) + sh) != (ref[w + c] & 1)) m |= 1u << c;
+               return m;
+            };
+            unsigned int m = mismatch(shift[r]);
+            if (m != 0)
+            {
+               for (int d : {-1, 1, -2, 2})
+               {
+                  if (mismatch(shift[r] + d) == 0) { shift[r] += d; m = 0; break; }
+               }
+            }
+            unstable_mask |= m;
+         }
+         for (unsigned int c = 0; c < 16; c++)
+         {
+            if (unstable_mask & (1u << c)) t.bitfield[merged[k].first + w + c] |= BIT_WEAK;
+         }
+      }
+   }
+}
+
+void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, unsigned int nb_bits,
+                                 const unsigned short* cell_ns)
+{
+   track.nb_sector_density = 0;
+   if (bits == nullptr || cell_ns == nullptr) return;
+
+   std::vector<std::pair<unsigned int, unsigned int>> fields;
+   FindDataFields(bits, nb_bits, fields);
+
+   double mean[32];
+   int nb = 0;
+   for (auto& f : fields)
+   {
+      if (nb >= 32) break;
+      unsigned int end = (f.second >= f.first + 32) ? f.second - 32 : f.second; // data only, no CRC
+      if (end <= f.first + 256) continue;
+      double sum = 0;
+      for (unsigned int c = f.first; c < end; c++) sum += cell_ns[c];
+      mean[nb++] = sum / (end - f.first);
    }
    if (nb == 0) return;
 
@@ -1513,6 +1598,10 @@ void IDisk::CreateSingleTrackFromMultiRevolutions(int side, int track)
       }
       else
       {
+         if (GetPlatform() == PLATFORM_ATARI_ST)
+         {
+            MarkFuzzyDataFields(side, track);
+         }
          for (unsigned int rev = 0; rev < side_[side].tracks[track].nb_revolutions; rev++)
          {
             delete[]side_[side].tracks[track].revolution[rev].bitfield;

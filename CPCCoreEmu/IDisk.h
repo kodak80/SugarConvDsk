@@ -1,3 +1,4 @@
+#include <vector>
 #pragma once
 //////////////////////////////////////////////////////////
 // IDisk.h
@@ -278,6 +279,11 @@ public:
    // bits : one cell per byte (0/1), cell_ns : PLL cell length for each of those cells (ns).
    static void MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, unsigned int nb_bits,
                                     const unsigned short* cell_ns);
+   // Flag cells of data fields that differ between revolutions as weak (fuzzy sectors)
+   void MarkFuzzyDataFields(int side, int track);
+   // Locate every IBM MFM data field (after A1 A1 A1 FB/F8) : [start, end) in cells, CRC included
+   static void FindDataFields(const unsigned char* bits, unsigned int nb_bits,
+                              std::vector<std::pair<unsigned int, unsigned int>>& fields);
 
    // MFM Tracks
    typedef struct

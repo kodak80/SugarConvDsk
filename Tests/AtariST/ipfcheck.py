@@ -74,14 +74,65 @@ def decode(bits, timebuf):
         pos = i + 48
     return found
 
+def load_all(lib, path):
+    cid = lib.CAPSAddImage()
+    if lib.CAPSLockImage(cid, path.encode()) != 0:
+        raise SystemExit('CAPSLockImage FAILED on ' + path)
+    fl = F_INDEX | F_DENVAR | F_UPDATEFD | F_TYPE
+    lib.CAPSLoadImage(cid, fl)
+    ii = ImageInfo(); lib.CAPSGetImageInfo(C.byref(ii), cid)
+    out = {}
+    for cyl in range(ii.mincyl, ii.maxcyl + 1):
+        for head in range(ii.minhead, ii.maxhead + 1):
+            ti = TI2(); ti.type = 2
+            if lib.CAPSLockTrack(C.byref(ti), cid, cyl, head, fl) != 0:
+                continue
+            n = ti.tracklen
+            buf = bytes(ti.trackbuf[:n]) if n else b''
+            bits = [(buf[k >> 3] >> (7 - (k & 7))) & 1 for k in range(n * 8)]
+            tb = [ti.timebuf[k] for k in range(ti.timelen)] if ti.timelen and ti.timebuf else []
+            out[(cyl, head)] = (decode(bits, tb) if bits else {}, n, ti.weakcnt)
+    plats = [PLAT.get(p, p) for p in ii.platform if p]
+    return out, plats
+
+def compare(lib, mine, ref):
+    a, pa = load_all(lib, mine)
+    b, pb = load_all(lib, ref)
+    print(f'mine platform={pa} tracks={len(a)}   ref platform={pb} tracks={len(b)}')
+    same = diff = 0
+    for key in sorted(set(a) | set(b)):
+        sa, na, wa = a.get(key, ({}, 0, 0)); sb, nb, wb = b.get(key, ({}, 0, 0))
+        if not sa and not sb:
+            continue
+        probs = []
+        for r in sorted(set(sa) | set(sb)):
+            x, y = sa.get(r), sb.get(r)
+            if x is None: probs.append(f'R{r} missing'); continue
+            if y is None: probs.append(f'R{r} extra'); continue
+            if x[2] != y[2]:
+                probs.append(f'R{r} data{"" if x[1] else "(mine CRC bad)"}{"" if y[1] else "(ref CRC bad)"}')
+            dx = round(x[3]) if x[3] else 1000; dy = round(y[3]) if y[3] else 1000
+            if abs(dx - dy) > 20: probs.append(f'R{r} density mine={dx} ref={dy}')
+        if wa or wb:
+            if bool(wa) != bool(wb): probs.append(f'weak mine={wa} ref={wb}')
+        if probs:
+            diff += 1
+            print(f'{key[0]:02}.{key[1]} bytes mine={na} ref={nb} : ' + ', '.join(probs))
+        else:
+            same += 1
+    print(f'SUMMARY identical_tracks={same} differing_tracks={diff}')
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('lib'); ap.add_argument('ipf'); ap.add_argument('ref', nargs='?')
     ap.add_argument('--spt', type=int, default=9); ap.add_argument('--sides', type=int, default=2)
     ap.add_argument('--quiet', action='store_true')
+    ap.add_argument('--cmp', help='compare sector contents/density with another IPF (e.g. an official SPS one)')
     a = ap.parse_args()
     lib = C.CDLL(a.lib)
     lib.CAPSInit()
+    if a.cmp:
+        compare(lib, a.ipf, a.cmp); return
     cid = lib.CAPSAddImage()
     if lib.CAPSLockImage(cid, a.ipf.encode()) != 0:
         print('CAPSLockImage FAILED'); sys.exit(2)
