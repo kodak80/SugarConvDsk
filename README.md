@@ -19,6 +19,8 @@ Usage : SugarConvDsk source [destination] [-s=side] [-second=path][-o=outputform
     
     -second=path : the 2nd side is replaced by the dump source specified in 'path'
 
+    -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.
+
     -p=platform : Target machine recorded in the output (IPF platform field) : ST or CPC.
        If omitted, it is guessed from the dump : more than 60 cylinders means Atari ST.
 
@@ -86,8 +88,15 @@ Flux dumps (SCP, KryoFlux RAW stream sets, CT-RAW) of Atari ST disks can be conv
  Checked against real dumps : Defender II CT-RAW gives sector data, Copylock ST density and weak areas
  identical to the SPS IPF ; King's Quest 3 (3 disks) KryoFlux and CT-RAW give identical IPFs.
 
+HFE output is HFE v3 (HXCHFEV3) by default, as read by FlashFloppy and the HxC tools :
+ - fuzzy / weak bits are written as random-byte opcodes, so a fuzzy sector reads differently each time ;
+ - sectors measured slower or faster (Copylock ST) get their own bit rate ;
+ - Atari ST disks are flagged with the Atari ST interface mode.
+Use -hfev1 for the original format if your emulator or firmware doesn't read v3 (weak bits and
+bit rate changes are then lost). HFE v3 files can also be read back as a source.
+
 Tests/AtariST contains a flux generator for synthetic ST disks and an IPF checker based on the SPS
-capsimage library ; run_tests.sh runs the whole set.
+capsimage library, hfecheck.py which decodes HFE v1/v3 the way FlashFloppy does, and run_tests.sh.
 
 Compilation
 =

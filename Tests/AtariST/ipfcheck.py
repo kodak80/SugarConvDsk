@@ -175,4 +175,5 @@ def main():
     if ref is not None:
         print(f'SUMMARY tracks_with_errors={bad} sectors_checked={total}')
 
-main()
+if __name__ == '__main__':
+    main()

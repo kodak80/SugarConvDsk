@@ -12,6 +12,9 @@ Usage : SugarConvDsk source [destination] [-s=side] [-p=platform] [-second=side_
         SCP : Supercard Pro format
     If this parameter is not used, default output format is IPF
 
+    -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.
+       HFE v3 keeps weak/fuzzy bits and sector speed changes (Copylock ST) ; v1 cannot.
+
     -p=platform : Target machine recorded in the output (IPF platform field). ST or CPC.
        If omitted, it is guessed from the dump : more than 60 cylinders means Atari ST.
 

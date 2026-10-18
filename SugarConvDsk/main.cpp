@@ -186,6 +186,7 @@ out:
 #include "DiskGen.h"
 #include "DiskBuilder.h"
 #include "FileAccess.h"
+#include "FormatTypeHFE.h"
 
 
 #ifdef __unix
@@ -374,6 +375,9 @@ void PrintUsage()
 
    printf("    If this parameter is not used, default output format is IPF\n");
    printf("\n");
+   printf("    -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.\n");
+   printf("       HFE v3 keeps weak/fuzzy bits and sector speed changes (Copylock ST) ; v1 cannot.\n");
+   printf("\n");
    printf("    -p=platform : Target machine recorded in the output (IPF platform field). ST or CPC.\n");
    printf("       If omitted, it is guessed from the dump : more than 60 cylinders means Atari ST.\n");
    printf("\n");
@@ -439,6 +443,10 @@ int main(int argc, char** argv)
          else if (stricmp(argv[i], "-r") == 0)
          {
             sub_dir = true;
+         }
+         else if (stricmp(argv[i], "-hfev1") == 0)
+         {
+            FormatTypeHFE::write_v1_ = true;
          }
          else if (stricmp(argv[i], "-p=ST") == 0)
          {

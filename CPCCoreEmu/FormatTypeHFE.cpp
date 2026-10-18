@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "FormatTypeHFE.h"
+#include <vector>
+#include <algorithm>
 
 
 #define IBMPC_DD_FLOPPYMODE 0x00
@@ -55,6 +57,24 @@ typedef struct
 } Pictrack;
 
 
+// HFE v3 opcodes, as stored in the file (HFE bytes are LSB-first, so these are the bit-reversed
+// 0xF0..0xF4 of the HxC documentation). A data byte never starts with 4 one-cells in valid MFM.
+#define HFE3_OP_NOP      0x0F
+#define HFE3_OP_INDEX    0x8F
+#define HFE3_OP_BITRATE  0x4F   // + 1 byte : cell period in 36 MHz / 2 ticks (72 = 250 kbit/s)
+#define HFE3_OP_SKIPBITS 0xCF   // + 1 byte : skip 1-7 cells of the following byte
+#define HFE3_OP_RAND     0x2F   // a byte of random cells (weak / fuzzy bits)
+#define HFE3_NOMINAL_RATE 72
+
+bool FormatTypeHFE::write_v1_ = false;
+
+static unsigned char ReverseBits(unsigned char v)
+{
+   unsigned char r = 0;
+   for (int i = 0; i < 8; i++) if (v & (1 << i)) r |= 0x80 >> i;
+   return r;
+}
+
 FormatTypeHFE::FormatTypeHFE()
 {
 }
@@ -100,7 +120,7 @@ bool FormatTypeHFE::CanLoad(const char* file_path)
       unsigned char header[0x8] = {0};
       // check the 22 first char
       fread(header, 1, 0x8, file);
-      if (memcmp(header, "HXCPICFE", 8) == 0)
+      if (memcmp(header, "HXCPICFE", 8) == 0 || memcmp(header, "HXCHFEV3", 8) == 0)
       {
          can_load = true;
       }
@@ -144,7 +164,8 @@ int FormatTypeHFE::LoadDisk(const char* file_path, IDisk*& created_disk, ILoadin
 int FormatTypeHFE::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& created_disk,
                             ILoadingProgress* loading_progress)
 {
-   if (memcmp(buffer, "HXCPICFE", 8) == 0)
+   const bool v3 = (size >= 8 && memcmp(buffer, "HXCHFEV3", 8) == 0);
+   if (size >= 0x400 && (v3 || memcmp(buffer, "HXCPICFE", 8) == 0))
    {
       IDisk* new_disk = new IDisk();
 
@@ -193,7 +214,9 @@ int FormatTypeHFE::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
          while (byte_to_read > 0)
          {
             //fread(buf, 1, 0x200, file);
-            memcpy(buf, &buffer[index_buffer], 0x200);
+            memset(buf, 0, sizeof(buf));
+            if (index_buffer < size)
+               memcpy(buf, &buffer[index_buffer], std::min<size_t>(0x200, size - index_buffer));
             index_buffer += 0x200;
 
             unsigned int cnt = (byte_to_read < 0x100) ? byte_to_read : 0x100;
@@ -208,16 +231,34 @@ int FormatTypeHFE::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
 
          for (int side = 0; side < new_disk->nb_sides_; side++)
          {
-            new_disk->side_[side].tracks[track].size = pck_trk[track].track_len * 4;
-            new_disk->side_[side].tracks[track].bitfield = new unsigned char[new_disk->side_[side].
-               tracks[track].size];
-
-            // TODO : Multiple side
-            for (unsigned int i = 0; i < new_disk->side_[side].tracks[track].size; i++)
+            const unsigned char* src = (side == 0) ? buffer1 : buffer2;
+            const unsigned int nb_bytes = pck_trk[track].track_len / 2;
+            std::vector<unsigned char> cells;
+            cells.reserve(nb_bytes * 8);
+            for (unsigned int i = 0; i < nb_bytes; i++)
             {
-               new_disk->side_[side].tracks[track].bitfield[i] = (((side == 0) ? buffer1 : buffer2)[
-                  i >> 3]) >> ((i & 7)) & 1;
+               unsigned char x = src[i];
+               unsigned int skip = 0;
+               unsigned char flag = 0;
+               if (v3 && (x & 0x0F) == 0x0F)
+               {
+                  if (x == HFE3_OP_BITRATE) { i++; continue; }     // timing isn't kept in the bit model
+                  if (x == HFE3_OP_SKIPBITS && i + 2 < nb_bytes)
+                  {
+                     skip = ReverseBits(src[i + 1]) & 7;
+                     i += 2;
+                     x = src[i];
+                     if (x == HFE3_OP_RAND) { x = 0; flag = BIT_WEAK; }
+                  }
+                  else if (x == HFE3_OP_RAND) { x = 0; flag = BIT_WEAK; }
+                  else continue;                                     // NOP, INDEX
+               }
+               for (unsigned int b = skip; b < 8; b++) cells.push_back(((x >> b) & 1) | flag);
             }
+            IDisk::MFMTrack& t = new_disk->side_[side].tracks[track];
+            t.size = static_cast<unsigned int>(cells.size());
+            t.bitfield = new unsigned char[t.size + 1];
+            if (t.size) memcpy(t.bitfield, cells.data(), t.size);
          }
          delete[]buffer1;
          delete[]buffer2;
@@ -234,115 +275,182 @@ int FormatTypeHFE::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
    }
 }
 
+// One side of one track, encoded as HFE bytes (cells LSB-first).
+static std::vector<unsigned char> EncodeTrackSide(IDisk* disk, int side, unsigned int track, bool v3,
+                                                  unsigned int& fixed_bytes)
+{
+   std::vector<unsigned char> out;
+   if (side >= disk->nb_sides_ || track >= disk->side_[side].nb_tracks) return out;
+   const IDisk::MFMTrack& t = disk->side_[side].tracks[track];
+   const unsigned char* bits = t.bitfield;
+   unsigned int n = t.size;
+   if (bits == nullptr || n == 0) return out;
+
+   // A track the merge couldn't build (unformatted / noise) is a 16 KB weak placeholder. Write one
+   // revolution of it (100000 cells at 300 rpm), so HFE track lengths stay realistic and in range.
+   if (n > 110000)
+   {
+      std::vector<std::pair<unsigned int, unsigned int>> fields;
+      IDisk::FindDataFields(bits, n, fields);
+      if (fields.empty()) n = 100000;
+   }
+
+   // Cell rate per range (v3 only) : data fields measured faster/slower than the rest of the track,
+   // e.g. Copylock ST, are written with their own bit rate.
+   std::vector<std::pair<unsigned int, unsigned char>> rate_changes; // cell position -> rate
+   if (v3 && t.nb_sector_density > 0)
+   {
+      std::vector<std::pair<unsigned int, unsigned int>> fields;
+      IDisk::FindDataFields(bits, n, fields);
+      for (size_t k = 0; k < fields.size() && k < t.nb_sector_density; k++)
+      {
+         int d = t.sector_density[k];
+         if (d < 25 && d > -25) continue;
+         // The protection times the whole sector : start at its ID field (~48 bytes before the data)
+         unsigned int start = (fields[k].first > 48 * 16) ? fields[k].first - 48 * 16 : 0;
+         unsigned char rate = static_cast<unsigned char>(HFE3_NOMINAL_RATE * (1000 + d) / 1000.0 + 0.5);
+         rate_changes.emplace_back(start & ~7u, rate);
+         rate_changes.emplace_back((fields[k].second + 7) & ~7u, HFE3_NOMINAL_RATE);
+      }
+   }
+
+   if (v3)
+   {
+      out.push_back(HFE3_OP_INDEX);
+      out.push_back(HFE3_OP_BITRATE);
+      out.push_back(ReverseBits(HFE3_NOMINAL_RATE));
+   }
+
+   size_t next_rate = 0;
+   for (unsigned int c = 0; c < n; c += 8)
+   {
+      while (v3 && next_rate < rate_changes.size() && rate_changes[next_rate].first <= c)
+      {
+         out.push_back(HFE3_OP_BITRATE);
+         out.push_back(ReverseBits(rate_changes[next_rate].second));
+         next_rate++;
+      }
+      unsigned int cnt = (n - c < 8) ? n - c : 8;
+      unsigned char b = 0;
+      bool weak = false;
+      for (unsigned int i = 0; i < cnt; i++)
+      {
+         unsigned char cell = bits[c + i];
+         if (cell & (BIT_WEAK | BIT_OPTIONAL)) weak = true;
+         if (cell & 1) b |= 1 << i;
+      }
+      if (cnt < 8)
+      {
+         // Last partial byte : the remaining cells are put at the end of a byte, the start is skipped
+         if (v3)
+         {
+            out.push_back(HFE3_OP_SKIPBITS);
+            out.push_back(ReverseBits(static_cast<unsigned char>(8 - cnt)));
+            out.push_back(weak ? HFE3_OP_RAND : static_cast<unsigned char>(b << (8 - cnt)));
+         }
+         else
+         {
+            out.push_back(b);
+         }
+         break;
+      }
+      if (v3 && weak)
+      {
+         out.push_back(HFE3_OP_RAND);
+         continue;
+      }
+      if (v3 && (b & 0x0F) == 0x0F)
+      {
+         // Four one-cells in a row can't be MFM (only unformatted noise) and would read as an opcode
+         b &= ~0x08;
+         fixed_bytes++;
+      }
+      out.push_back(b);
+   }
+   return out;
+}
+
 int FormatTypeHFE::SaveDisk(const char* file_path, IDisk* disk, ILoadingProgress* loading_progress) const
 {
-   int ret = 1;
-
+   int ret = -1;
    FILE* file;
    int res = disk->SmartOpen(&file, file_path, ".HFE");
+   if (res != 0) return ret;
 
-   if (res == 0)
+   const bool v3 = !write_v1_;
+   const bool atari_st = (disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST);
+   unsigned int nb_tracks = disk->side_[0].nb_tracks;
+   if (disk->nb_sides_ > 1 && disk->side_[1].nb_tracks > nb_tracks) nb_tracks = disk->side_[1].nb_tracks;
+   if (nb_tracks > 255) nb_tracks = 255;
+
+   // First part : Header
+   unsigned char buffer[0x200];
+   memset(buffer, 0xFF, sizeof(buffer));
+
+   Picfileformatheader header;
+   memset(&header, 0xFF, sizeof(header));
+   memcpy(header.header_signature, v3 ? "HXCHFEV3" : "HXCPICFE", sizeof(header.header_signature));
+   header.formatrevision = 0;
+   header.number_of_track = static_cast<unsigned char>(nb_tracks);
+   header.number_of_side = (disk->nb_sides_ > 1) ? 2 : 1;
+   header.track_encoding = ISOIBM_MFM_ENCODING;
+   header.bit_rate = 250;
+   header.floppy_rpm = 300;
+   header.floppyinterfacemode = atari_st ? ATARIST_DD_FLOPPYMODE : CPC_DD_FLOPPYMODE;
+   header.dnu = 1;
+   header.track_list_offset = 1; // Offset of the track list = 512
+   header.write_allowed = 0xFF;
+   header.single_step = 0xFF;
+   header.track0_s0_altencoding = 0xFF;
+   header.track0_s0_encoding = 0xFF;
+   header.track0_s1_altencoding = 0xFF;
+   header.track0_s1_encoding = 0xFF;
+
+   memcpy(buffer, &header, sizeof(header));
+   fwrite(buffer, 1, sizeof(buffer), file);
+
+   // Second part : Track offset LUT (written once the offsets are known)
+   std::vector<Pictrack> lut(nb_tracks);
+   const unsigned int lut_blocks = (nb_tracks * sizeof(Pictrack) + 0x1FF) / 0x200;
+   memset(buffer, 0xFF, sizeof(buffer));
+   for (unsigned int i = 0; i < lut_blocks; i++) fwrite(buffer, 1, 0x200, file);
+
+   // Third part : Track data, 256 bytes of side 0 then 256 bytes of side 1 per 512 byte block
+   unsigned int fixed_bytes = 0;
+   for (unsigned int track = 0; track < nb_tracks; track++)
    {
-      // First part : Header
-      unsigned char buffer[0x200];
-      memset(buffer, 0xFF, sizeof(buffer));
-
-      Picfileformatheader header = {0xFF};
-      memcpy(header.header_signature, "HXCPICFE", sizeof(header.header_signature));
-      header.formatrevision = 0;
-      header.number_of_track = disk->side_[0].nb_tracks;
-      header.number_of_side = disk->nb_sides_;
-      header.track_encoding = ISOIBM_MFM_ENCODING;
-      header.bit_rate = 250;
-      header.floppy_rpm = 300;
-      header.dnu = 1;
-      header.floppyinterfacemode = CPC_DD_FLOPPYMODE;
-      header.track_list_offset = 1; // Offset of the track list = 512
-      header.write_allowed = 0xFF;
-      header.single_step = 0xFF; // Single step ? TODO : To check !!
-      header.track0_s0_altencoding = 0xFF;
-      header.track0_s0_encoding = 0xFF;
-      header.track0_s1_altencoding = 0xFF;
-      header.track0_s1_encoding = 0xFF;
-
-      memcpy(buffer, &header, sizeof(header));
-      fwrite(&buffer, 1, sizeof(buffer), file);
-
-      // Second part : Track offset LUT
-      Pictrack* pck_trk = new Pictrack[header.number_of_track];
-      memset(pck_trk, 0, sizeof(Pictrack) * header.number_of_track);
-
-      memset(buffer, 0xFF, sizeof(buffer));
-
-      fwrite(buffer, 0x200, 1, file);
-
-      // Third part : Track data
-      for (unsigned int track = 0; track < header.number_of_track; track++)
+      std::vector<unsigned char> sides[2];
+      for (int s = 0; s < 2; s++) sides[s] = EncodeTrackSide(disk, s, track, v3, fixed_bytes);
+      size_t len = std::max(sides[0].size(), sides[1].size());
+      // Pad the shorter side (or an absent one) : NOP in v3, gap-free filler in v1
+      for (int s = 0; s < 2; s++) sides[s].resize(len, v3 ? HFE3_OP_NOP : 0x00);
+      if (len * 2 > 0xFFFF)
       {
-         // Where are we ? Set the track offset
-         //fgetpos ( file, &pos );
-         const int post_current = ftell(file);
-         pck_trk[track].offset = static_cast<unsigned short>(post_current / 0x200);
-         int byte_to_write = (disk->side_[0].tracks[track].size + 7) / 8;
-         if (disk->side_[1].nb_tracks > track)
-         {
-            if (disk->side_[1].tracks[track].size > disk->side_[0].tracks[track].size)
-               byte_to_write = (disk->side_[1].tracks[track].size + 7) / 8;
-         }
-         byte_to_write *= 2;
-
-         pck_trk[track].track_len = byte_to_write;
-
-         unsigned int index = 0;
-         while (byte_to_write > 0)
-         {
-            memset(buffer, 0, 0x200);
-
-            // First track
-            unsigned int cnt = (byte_to_write < 0x100) ? byte_to_write : 0x100;
-
-            unsigned char b = 0;
-            unsigned char numb = 0;
-
-            int tmpindex[2];
-            tmpindex[0] = tmpindex[1] = index;
-            for (int s = 0; s < 2; s++)
-            {
-               index = tmpindex[s];
-               int numbtowr = 0;
-               if (s < disk->nb_sides_ && track < disk->side_[s].nb_tracks)
-               {
-                  for (unsigned int i = index; i < index + 0x800 && i < disk->side_[s].tracks[track].size; i++)
-                  {
-                     b |= ((disk->side_[s].tracks[track]./*Revolution [0].*/bitfield[i]) << numb++);
-
-                     if (numb == 8)
-                     {
-                        buffer[(0x100 * s) + numbtowr++] = b;
-                        numb = 0;
-                        b = 0;
-                     }
-                  }
-               }
-               tmpindex[s] += 0x800;
-            }
-            index = (tmpindex[0] > tmpindex[1] ? tmpindex[0] : tmpindex[1]);
-
-            // Write 0x200 bytes
-            fwrite(buffer, 1, 0x200, file);
-
-            byte_to_write -= cnt;
-         }
+         printf("(track %u too long for HFE, truncated) ", track);
+         len = 0xFFFF / 2;
       }
 
-      // Write now the LUT
-      fseek(file, 0x200, SEEK_SET);
-      fwrite(pck_trk, sizeof(pck_trk) * header.number_of_track, 1, file);
-      delete[]pck_trk;
-      ret = 0;
-
-      fclose(file);
+      lut[track].offset = static_cast<unsigned short>(ftell(file) / 0x200);
+      lut[track].track_len = static_cast<unsigned short>(len * 2);
+      for (size_t pos = 0; pos < len; pos += 0x100)
+      {
+         memset(buffer, v3 ? HFE3_OP_NOP : 0x00, sizeof(buffer));
+         size_t cnt = std::min<size_t>(0x100, len - pos);
+         memcpy(buffer, &sides[0][pos], cnt);
+         memcpy(&buffer[0x100], &sides[1][pos], cnt);
+         fwrite(buffer, 1, 0x200, file);
+      }
    }
+
+   // Write now the LUT
+   fseek(file, 0x200, SEEK_SET);
+   fwrite(lut.data(), sizeof(Pictrack), lut.size(), file);
+   fclose(file);
+   if (fixed_bytes != 0)
+   {
+      printf("(%u non-MFM byte(s) adjusted for HFE v3) ", fixed_bytes);
+   }
+   ret = 0;
    return ret;
 }
 
