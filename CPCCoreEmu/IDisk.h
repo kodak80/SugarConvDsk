@@ -273,6 +273,16 @@ public:
       // from the track's median cell length (+50 = cells 5% longer). Filled by flux loaders only.
       short sector_density[32];
       unsigned char nb_sector_density;
+      // Parts of data fields written faster or slower than the rest of the track (density keys :
+      // Copylock = whole sector, Speedlock-style = a slow patch then a fast patch inside a sector).
+      struct DensityRun
+      {
+         unsigned char field;       // index of the data field on the track (FindDataFields order)
+         unsigned short byte_start; // first data byte (after the mark) of the run
+         unsigned short byte_len;
+         short permille;            // cell length deviation from the track median
+      } density_runs[16];
+      unsigned char nb_density_runs;
    } MFMTrack;
 
    // Measure the cell length of every data field of a decoded flux revolution.

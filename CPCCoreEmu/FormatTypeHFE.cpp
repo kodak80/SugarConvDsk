@@ -295,23 +295,44 @@ static std::vector<unsigned char> EncodeTrackSide(IDisk* disk, int side, unsigne
       if (fields.empty()) n = 100000;
    }
 
-   // Cell rate per range (v3 only) : data fields measured faster/slower than the rest of the track,
-   // e.g. Copylock ST, are written with their own bit rate.
+   // Cell rate per range (v3 only) : parts of the track measured faster/slower than the rest are
+   // written with their own bit rate. A whole slow sector (Copylock ST) is timed from its ID field;
+   // a patch inside a sector (Speedlock-style density key) only over the patch itself.
    std::vector<std::pair<unsigned int, unsigned char>> rate_changes; // cell position -> rate
-   if (v3 && t.nb_sector_density > 0)
+   if (v3 && (t.nb_sector_density > 0 || t.nb_density_runs > 0))
    {
       std::vector<std::pair<unsigned int, unsigned int>> fields;
       IDisk::FindDataFields(bits, n, fields);
-      for (size_t k = 0; k < fields.size() && k < t.nb_sector_density; k++)
+      auto rate_of = [](int permille)
       {
-         int d = t.sector_density[k];
+         return static_cast<unsigned char>(HFE3_NOMINAL_RATE * (1000 + permille) / 1000.0 + 0.5);
+      };
+      for (size_t k = 0; k < fields.size(); k++)
+      {
+         const unsigned int field_bytes = (fields[k].second - fields[k].first) / 16;
+         bool partial = false;
+         for (int r = 0; r < t.nb_density_runs; r++)
+         {
+            const IDisk::MFMTrack::DensityRun& run = t.density_runs[r];
+            if (run.field != k || run.byte_len * 10 >= field_bytes * 8) continue;
+            partial = true;
+            const unsigned int start = fields[k].first + (run.byte_start + 1u) * 16u;
+            const unsigned int end = start + run.byte_len * 16u;
+            if (end > n) continue;
+            rate_changes.emplace_back(start & ~7u, rate_of(run.permille));
+            rate_changes.emplace_back((end + 7) & ~7u, HFE3_NOMINAL_RATE);
+         }
+         if (partial || k >= t.nb_sector_density) continue;
+         const int d = t.sector_density[k];
          if (d < 25 && d > -25) continue;
          // The protection times the whole sector : start at its ID field (~48 bytes before the data)
          unsigned int start = (fields[k].first > 48 * 16) ? fields[k].first - 48 * 16 : 0;
-         unsigned char rate = static_cast<unsigned char>(HFE3_NOMINAL_RATE * (1000 + d) / 1000.0 + 0.5);
-         rate_changes.emplace_back(start & ~7u, rate);
+         rate_changes.emplace_back(start & ~7u, rate_of(d));
          rate_changes.emplace_back((fields[k].second + 7) & ~7u, HFE3_NOMINAL_RATE);
       }
+      std::sort(rate_changes.begin(), rate_changes.end(),
+                [](const std::pair<unsigned int, unsigned char>& x, const std::pair<unsigned int, unsigned char>& y)
+                { return x.first < y.first; });
    }
 
    if (v3)

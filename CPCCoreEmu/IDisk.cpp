@@ -232,6 +232,7 @@ void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, uns
                                  const unsigned short* cell_ns)
 {
    track.nb_sector_density = 0;
+   track.nb_density_runs = 0;
    if (bits == nullptr || cell_ns == nullptr) return;
 
    std::vector<std::pair<unsigned int, unsigned int>> fields;
@@ -259,10 +260,59 @@ void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, uns
       track.sector_density[i] = static_cast<short>((mean[i] / median - 1.0) * 1000.0);
    }
    track.nb_sector_density = static_cast<unsigned char>(nb);
+
+   // Runs inside each data field : per-byte cell length, smoothed over 16 bytes, grouped where it
+   // stays at least 2.5% away from the median for 32 bytes or more.
+   for (size_t k = 0; k < fields.size() && track.nb_density_runs < 16; k++)
+   {
+      const unsigned int first = fields[k].first;
+      const unsigned int nb_bytes = (fields[k].second - first) / 16;
+      if (nb_bytes < 64) continue;
+      std::vector<double> dev(nb_bytes);
+      for (unsigned int b = 0; b < nb_bytes; b++)
+      {
+         double sum = 0;
+         for (unsigned int c = 0; c < 16; c++) sum += cell_ns[first + b * 16 + c];
+         dev[b] = (sum / 16) / median - 1.0;
+      }
+      std::vector<double> smooth(nb_bytes);
+      for (unsigned int b = 0; b < nb_bytes; b++)
+      {
+         const unsigned int lo = (b >= 8) ? b - 8 : 0, hi = std::min(nb_bytes, b + 8);
+         double sum = 0;
+         for (unsigned int i = lo; i < hi; i++) sum += dev[i];
+         smooth[b] = sum / (hi - lo);
+      }
+      unsigned int b = 0;
+      while (b < nb_bytes && track.nb_density_runs < 16)
+      {
+         const int sign = (smooth[b] >= 0.025) ? 1 : (smooth[b] <= -0.025) ? -1 : 0;
+         unsigned int e = b + 1;
+         while (e < nb_bytes && ((sign > 0 && smooth[e] >= 0.025) || (sign < 0 && smooth[e] <= -0.025) ||
+                                 (sign == 0 && smooth[e] > -0.025 && smooth[e] < 0.025)))
+            e++;
+         if (sign != 0 && e - b >= 32)
+         {
+            double sum = 0;
+            for (unsigned int i = b; i < e; i++) sum += dev[i];
+            IDisk::MFMTrack::DensityRun& r = track.density_runs[track.nb_density_runs++];
+            r.field = static_cast<unsigned char>(k);
+            // byte 0 of the field is the mark : data bytes start at 1
+            r.byte_start = static_cast<unsigned short>(b > 0 ? b - 1 : 0);
+            r.byte_len = static_cast<unsigned short>(e - b);
+            r.permille = static_cast<short>(sum / (e - b) * 1000.0);
+         }
+         b = e;
+      }
+   }
+
    if (getenv("SUGARCONV_DEBUG_DENSITY"))
    {
       printf("\n density median %.1f ns :", median);
       for (int i = 0; i < nb; i++) printf(" %+d", track.sector_density[i]);
+      for (int i = 0; i < track.nb_density_runs; i++)
+         printf(" [field %d bytes %d-%d %+d]", track.density_runs[i].field, track.density_runs[i].byte_start,
+                track.density_runs[i].byte_start + track.density_runs[i].byte_len - 1, track.density_runs[i].permille);
    }
 }
 
