@@ -292,6 +292,7 @@ public:
    // Custom data-stream tracks (sync run + long MFM stream, no sector headers)
    static int FindStreamSync(const unsigned char* cells, unsigned int size, unsigned int& nb_syncs);
    bool CreateStreamTrackFromRevolutions(int side, int track);
+   bool FixIndexCrossing(int side, int track);
    // Flag cells of data fields that differ between revolutions as weak (fuzzy sectors)
    void MarkFuzzyDataFields(int side, int track);
    // Locate every IBM MFM data field (after A1 A1 A1 FB/F8) : [start, end) in cells, CRC included

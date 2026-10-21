@@ -398,6 +398,72 @@ bool IDisk::CreateStreamTrackFromRevolutions(int side, int track)
    return true;
 }
 
+
+// A sector that runs across the index (tight 11-sector tracks) is only readable if the track closes
+// on itself exactly : the cells after the index must continue the cells before it. Revolutions are
+// decoded index to index, and the flux interval that straddles the index can come out as one cell
+// too many or too few. When a data field crosses the index, try trimming / padding the end of the
+// track by up to 3 cells and keep the length whose join is valid MFM inside that field.
+bool IDisk::FixIndexCrossing(int side, int track)
+{
+   MFMTrack& t = side_[side].tracks[track];
+   if (t.bitfield == nullptr || t.size < 1000) return false;
+   const unsigned int n = t.size;
+   std::vector<unsigned char> ring(2 * n + 8);
+   for (unsigned int i = 0; i < n; i++) ring[i] = ring[n + i] = t.bitfield[i] & 1;
+   std::vector<std::pair<unsigned int, unsigned int>> fields;
+   FindDataFields(ring.data(), 2 * n, fields);
+   unsigned int f_start = 0, f_end = 0;
+   for (auto& f : fields) if (f.first < n && f.second > n) { f_start = f.first; f_end = f.second; }
+   if (f_end == 0) return false;
+
+   // MFM clock violations from just before the index to the end of the crossing field, for a track
+   // shortened (d < 0) or lengthened (d > 0, repeating the last cell value 0) by |d| cells
+   auto violations = [&](int d)
+   {
+      const unsigned int len = n + d;
+      auto cell = [&](unsigned int pos) -> unsigned char
+      {
+         pos %= len;
+         return (pos < n) ? (t.bitfield[pos] & 1) : 0;
+      };
+      // first cell of the crossing field in the adjusted ring (unchanged : it starts before the index)
+      unsigned int bad = 0;
+      const unsigned int from = std::max(f_start, n - 64) & ~1u;
+      // phase : data cells are odd relative to the field start
+      unsigned int phase = (f_start + 1) & 1;
+      const unsigned int to = f_end + (d > 0 ? d : 0) - (d < 0 ? -d : 0);
+      unsigned char prev = 0;
+      for (unsigned int pos = from; pos + 1 < to; pos++)
+      {
+         if (((pos - f_start) & 1) != 0) { prev = cell(pos); continue; } // data cell
+         const unsigned char c = cell(pos), dd = cell(pos + 1);
+         if (c != ((prev == 0 && dd == 0) ? 1 : 0)) bad++;
+         (void)phase;
+      }
+      return bad;
+   };
+   int best_d = 0;
+   unsigned int best = violations(0);
+   // smallest correction first : shifting by 2 cells also gives valid MFM (data moved by one bit),
+   // so among equally clean joins the nearest length wins
+   for (int d : {-1, 1, -2, 2, -3, 3})
+   {
+      const unsigned int v = violations(d);
+      if (v < best) { best = v; best_d = d; }
+   }
+   if (getenv("SUGARCONV_DEBUG_WEAK"))
+      printf("\n index crossing %02d.%d : join violations %u at length %+d (were %u)", track, side, best, best_d, violations(0));
+   if (best_d == 0) return false;
+   unsigned char* nb = new unsigned char[n + best_d + 32];
+   if (best_d < 0) memcpy(nb, t.bitfield, n + best_d);
+   else { memcpy(nb, t.bitfield, n); memset(nb + n, 0, best_d); }
+   delete[] t.bitfield;
+   t.bitfield = nb;
+   t.size = n + best_d;
+   return true;
+}
+
 IDisk::Platform IDisk::GetPlatform()
 {
    if (platform_ != PLATFORM_AUTO) return platform_;
@@ -1737,6 +1803,7 @@ void IDisk::CreateSingleTrackFromMultiRevolutions(int side, int track)
       {
          if (GetPlatform() == PLATFORM_ATARI_ST)
          {
+            FixIndexCrossing(side, track);
             MarkFuzzyDataFields(side, track);
          }
          for (unsigned int rev = 0; rev < side_[side].tracks[track].nb_revolutions; rev++)

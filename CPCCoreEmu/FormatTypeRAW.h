@@ -70,6 +70,7 @@ private:
    void HandleHWInfo(char* info, int size);
 
    int ComputeTrack(IDisk*& created_disk, int side, int track);
+   bool DecodeContinuous(IDisk*& created_disk, int side, int track);
 
    // File access
 
