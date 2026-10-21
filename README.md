@@ -86,6 +86,9 @@ Flux dumps (SCP, KryoFlux RAW stream sets, CT-RAW) of Atari ST disks can be conv
    track 1) : the timing is measured inside the sector. IPF output starts the track at that sector and
    cuts it into blocks at the patch edges, with IPF density type "Speedlock" (as in existing images of
    these disks) ; HFE v3 output plays the patches at their measured speed.
+ - Custom data-stream tracks ("Amiga tracks", MacroDOS : one sync mark then the whole track as one MFM
+   stream, no sector headers, e.g. Dragon's Breath) : merged across revolutions on their sync, written as
+   the sync plus decoded bytes, with the unstable write splice before the sync kept as fuzzy data.
  - Copylock ST is detected from SCP, KryoFlux and CT-RAW (CT-RAW uses its own density map).
  - Fuzzy sectors (Dungeon Master...) : every cell of a data field that is not stable across the dumped
    revolutions is written as fuzzy, so each read returns different data with a bad CRC.

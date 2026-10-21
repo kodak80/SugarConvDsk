@@ -326,6 +326,78 @@ void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, uns
    }
 }
 
+
+// Sync run (4489 repeated) followed by >= 64 valid MFM bytes : start of a custom data-stream track.
+int IDisk::FindStreamSync(const unsigned char* cells, unsigned int size, unsigned int& nb_syncs)
+{
+   static const char* sync = "0100010010001001";
+   auto valid_byte = [&](unsigned int q)
+   {
+      unsigned char prev = (q > 0) ? (cells[q - 1] & 1) : 0;
+      for (unsigned int i = 0; i < 8; i++)
+      {
+         const unsigned char c = cells[q + 2 * i] & 1, d = cells[q + 2 * i + 1] & 1;
+         if (cells[q + 2 * i] > 1 || cells[q + 2 * i + 1] > 1) return true; // weak : tolerated
+         if (c != ((prev == 0 && d == 0) ? 1 : 0)) return false;
+         prev = d;
+      }
+      return true;
+   };
+   int best = -1;
+   unsigned int best_len = 0;
+   for (unsigned int p = 0; p + 16 <= size; p++)
+   {
+      bool m = true;
+      for (unsigned int i = 0; i < 16 && m; i++) m = cells[p + i] <= 1 && (cells[p + i] & 1) == (sync[i] - '0');
+      if (!m) continue;
+      unsigned int k = 1;
+      while (p + 16 * (k + 1) <= size)
+      {
+         bool mm = true;
+         for (unsigned int i = 0; i < 16 && mm; i++) mm = (cells[p + 16 * k + i] & 1) == (sync[i] - '0');
+         if (!mm) break;
+         k++;
+      }
+      unsigned int q = p + 16 * k, good = 0;
+      while (q + 16 <= size && good < 64 && valid_byte(q)) { good++; q += 16; }
+      if (good >= 64 && k > best_len) { best = static_cast<int>(p); best_len = k; }
+      p += 16 * k - 1;
+   }
+   nb_syncs = best_len;
+   return best;
+}
+
+// Merge of a data-stream track : revolution 0 as reference, the other revolutions aligned on the
+// stream sync; cells that differ are weak. Returns false if revolution 0 isn't a stream track.
+bool IDisk::CreateStreamTrackFromRevolutions(int side, int track)
+{
+   MFMTrack& t = side_[side].tracks[track];
+   if (t.nb_revolutions == 0 || t.revolution[0].bitfield == nullptr) return false;
+   unsigned int nb0;
+   const int s0 = FindStreamSync(t.revolution[0].bitfield, t.revolution[0].size, nb0);
+   if (s0 < 0) return false;
+   const unsigned int n = t.revolution[0].size;
+   unsigned char* merged = new unsigned char[n + 32];
+   memcpy(merged, t.revolution[0].bitfield, n);
+   for (unsigned int r = 1; r < t.nb_revolutions; r++)
+   {
+      unsigned int nb;
+      const int sr = FindStreamSync(t.revolution[r].bitfield, t.revolution[r].size, nb);
+      if (sr < 0) continue;
+      const unsigned int nr = t.revolution[r].size;
+      // compare from the sync onwards, wrapping around each revolution
+      const unsigned int len = std::min(n, nr);
+      for (unsigned int i = 0; i < len; i++)
+      {
+         const unsigned int a = (s0 + i) % n, b = (sr + i) % nr;
+         if ((merged[a] & 1) != (t.revolution[r].bitfield[b] & 1)) merged[a] |= BIT_WEAK;
+      }
+   }
+   t.bitfield = merged;
+   t.size = n;
+   return true;
+}
+
 IDisk::Platform IDisk::GetPlatform()
 {
    if (platform_ != PLATFORM_AUTO) return platform_;
@@ -1646,6 +1718,8 @@ void IDisk::CreateSingleTrackFromMultiRevolutions(int side, int track)
 
       if (!CreateTrackFromRevolution(side, track))
       {
+         // No sector structure to merge on : custom data-stream tracks are merged on their sync
+         const bool stream = CreateStreamTrackFromRevolutions(side, track);
          for (unsigned int rev = 0; rev < side_[side].tracks[track].nb_revolutions; rev++)
          {
             delete[]side_[side].tracks[track].revolution[rev].bitfield;
@@ -1653,8 +1727,11 @@ void IDisk::CreateSingleTrackFromMultiRevolutions(int side, int track)
          delete[]side_[side].tracks[track].revolution;
          side_[side].tracks[track].revolution = nullptr;
          side_[side].tracks[track].nb_revolutions = 0;
-         side_[side].tracks[track].bitfield = nullptr;
-         side_[side].tracks[track].size = 0;
+         if (!stream)
+         {
+            side_[side].tracks[track].bitfield = nullptr;
+            side_[side].tracks[track].size = 0;
+         }
       }
       else
       {

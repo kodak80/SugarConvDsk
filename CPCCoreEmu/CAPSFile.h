@@ -184,10 +184,11 @@ protected:
    // SPS-style compact block : sync / decoded ID / gap / sync / decoded data (+ fuzzy runs), gap as fill
    // byte + trailing 00 bytes. Returns false (nothing written) when the block can't be represented exactly.
    bool AddCompactBlock(StreamRecording* data, StreamRecording* gap, const unsigned char* cells,
-                        unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor);
+                        unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor,
+                        unsigned int min_gap = 0);
 public:
    static bool compact_;          // use the compact encoder (default) ; -ipfraw disables it
-   unsigned int compact_blocks_ = 0, legacy_blocks_ = 0, speedlock_tracks_ = 0;
+   unsigned int compact_blocks_ = 0, legacy_blocks_ = 0, speedlock_tracks_ = 0, stream_tracks_ = 0;
 private:
    int AddDataRecord(StreamRecording* record, unsigned char type, int nb_byte_to_add, unsigned char* buffer,
                      bool byte_size);

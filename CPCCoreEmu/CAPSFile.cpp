@@ -1753,8 +1753,45 @@ static bool DecodeMfmByte(const unsigned char* cells, unsigned int pos, unsigned
    return ok && !weak;
 }
 
+
+// Stream block : sync run + decoded bytes (weak bytes as fuzzy) while the MFM stays valid.
+// Returns the cell where the stream stops (begin when nothing could be decoded).
+static unsigned int EncodeStreamBlock(std::vector<unsigned char>& ds, const unsigned char* cells, unsigned int begin,
+                                      unsigned int end, unsigned int nb_syncs)
+{
+   std::vector<unsigned char> sync_bytes;
+   for (unsigned int i = 0; i < nb_syncs; i++) { sync_bytes.push_back(0x44); sync_bytes.push_back(0x89); }
+   PushElement(ds, 1, static_cast<unsigned int>(sync_bytes.size()), sync_bytes.data(), sync_bytes.size());
+   unsigned int q = begin + 16 * nb_syncs;
+   std::vector<unsigned char> run;
+   unsigned int fuzzy = 0;
+   unsigned char v;
+   bool weak;
+   while (q + 16 <= end)
+   {
+      const bool ok = DecodeMfmByte(cells, q, v, weak);
+      if (weak)
+      {
+         if (!run.empty()) { PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size()); run.clear(); }
+         fuzzy++;
+      }
+      else if (ok)
+      {
+         if (fuzzy) { PushElement(ds, 5, fuzzy); fuzzy = 0; }
+         run.push_back(v);
+      }
+      else break;
+      q += 16;
+   }
+   if (!run.empty()) PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size());
+   if (fuzzy) PushElement(ds, 5, fuzzy);
+   ds.push_back(0);
+   return q;
+}
+
 bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, const unsigned char* cells,
-                               unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor)
+                               unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor,
+                               unsigned int min_gap)
 {
    static const unsigned char sync_bytes[6] = {0x44, 0x89, 0x44, 0x89, 0x44, 0x89};
    std::vector<unsigned char> ds, gs;
@@ -1822,6 +1859,7 @@ bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, cons
 
    // Gap up to the next block : fill byte, then 00 bytes just before the next sync
    const unsigned int gap_cells = end - data_end;
+   if (gap_cells < min_gap) return false; // the reader needs a gap to round the last block
    unsigned int zeros = 0;
    while (gap_cells >= 16 * (zeros + 1))
    {
@@ -2087,6 +2125,9 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
 
    unsigned char pattern_byte[16];
    bool starts_with_iam = false;
+   bool stream_track = false;
+   int stream_sync = -1;
+   unsigned int stream_nb_syncs = 0;
 
    if (!abort)
    {
@@ -2105,6 +2146,14 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
          {
             imge_item.start_bit_pos = (search_offset != -1) ? search_offset : 0;
             imge_item.start_byte_pos = imge_item.start_bit_pos / 8;
+         }
+         else if (compact_ && (stream_sync = IDisk::FindStreamSync(disk->side_[side].tracks[tr].bitfield,
+                                                              disk->side_[side].tracks[tr].size, stream_nb_syncs)) >= 0)
+         {
+            // No sector headers, but a sync + data stream : custom-format track
+            imge_item.start_bit_pos = static_cast<unsigned int>(stream_sync);
+            imge_item.start_byte_pos = imge_item.start_bit_pos / 8;
+            stream_track = true;
          }
          else
          {
@@ -2223,6 +2272,59 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
 
          unsigned int search_next_offset = FindNextSector(track_field, disk->side_[side].tracks[tr].size,
                                                           search_offset + 1, 8);
+         const bool last_block = (search_next_offset == (unsigned int)-1);
+         if (stream_track && search_offset == 0)
+         {
+            const unsigned int track_end = disk->side_[side].tracks[tr].size;
+            std::vector<unsigned char> ds;
+            const unsigned int stream_end = EncodeStreamBlock(ds, track_field, 0, track_end, stream_nb_syncs);
+            // block 0 : sync + decoded stream (whole bytes)
+            BlockDescriptor b0;
+            memset(&b0, 0, sizeof(b0));
+            b0.data_offset = data.offset;
+            b0.sps_specific.gap_offset = gap_data.offset;
+            AppendBytes(data.buffer, data.size, data.offset, ds);
+            b0.block_bits = stream_end;
+            b0.sps_specific.cell_type = 1;
+            b0.encoder_type = 1;
+            // the rest of the track (write splice before the sync) : exact cells, with a small gap at
+            // the very end so the reader can round the track size
+            const unsigned int rest = track_end - stream_end;
+            if (rest >= 32)
+            {
+               b0.gap_bits = 0;
+               list_block_descriptor.push_back(b0);
+               imge_item.data_bits += b0.block_bits;
+               imge_item.block_count++;
+               BlockDescriptor b1;
+               memset(&b1, 0, sizeof(b1));
+               b1.data_offset = data.offset;
+               b1.sps_specific.gap_offset = gap_data.offset;
+               AddRawBlock(data.buffer, data.size, data.offset, track_field, stream_end, track_end - 16, false);
+               b1.block_bits = track_end - 16 - stream_end;
+               b1.block_flag = 4;
+               b1.sps_specific.cell_type = 1;
+               b1.encoder_type = 1;
+               b0 = b1;
+            }
+            // gap : fill with the last decoded value pattern
+            std::vector<unsigned char> gs;
+            unsigned char fill = 0;
+            for (int i = 0; i < 8; i++) fill = static_cast<unsigned char>((fill << 1) | (track_field[track_end - 16 + 2 * i + 1] & 1));
+            PushElement(gs, 2, 8, &fill, 1);
+            gs.push_back(0);
+            AppendBytes(gap_data.buffer, gap_data.size, gap_data.offset, gs);
+            b0.gap_bits = (rest >= 32) ? 16 : rest;
+            b0.block_flag |= 1;
+            list_block_descriptor.push_back(b0);
+            imge_item.data_bits += b0.block_bits;
+            imge_item.gap_bits += b0.gap_bits;
+            imge_item.track_byte += (track_end + 7) / 8;
+            imge_item.block_count++;
+            stream_tracks_++;
+            search_offset = search_next_offset;
+            continue;
+         }
          if (speedlock && search_offset == 0)
          {
             const unsigned int block_end = (search_next_offset != (unsigned int)-1)
@@ -2260,7 +2362,8 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
          {
             const unsigned int block_end = (search_next_offset != (unsigned int)-1)
                                               ? search_next_offset : disk->side_[side].tracks[tr].size;
-            if (AddCompactBlock(&data, &gap_data, track_field, search_offset, block_end, block_descriptor))
+            if (AddCompactBlock(&data, &gap_data, track_field, search_offset, block_end, block_descriptor,
+                                last_block ? 8 : 0))
             {
                imge_item.data_bits += block_descriptor.block_bits;
                imge_item.gap_bits += block_descriptor.gap_bits;
@@ -2272,6 +2375,35 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
                continue;
             }
             legacy_blocks_++;
+            if (last_block && block_end - search_offset > 64)
+            {
+               // Exact cells, with the last byte as the track gap : the SPS reader rounds the track
+               // to whole bytes by growing the last gap, which must not be empty
+               BlockDescriptor lb;
+               memset(&lb, 0, sizeof(lb));
+               lb.data_offset = data.offset;
+               lb.sps_specific.gap_offset = gap_data.offset;
+               AddRawBlock(data.buffer, data.size, data.offset, track_field, search_offset, block_end - 16, false);
+               unsigned char fill = 0;
+               for (int i = 0; i < 8; i++) fill = static_cast<unsigned char>((fill << 1) | (track_field[block_end - 16 + 2 * i + 1] & 1));
+               std::vector<unsigned char> gs;
+               PushElement(gs, 2, 8, &fill, 1);
+               gs.push_back(0);
+               AppendBytes(gap_data.buffer, gap_data.size, gap_data.offset, gs);
+               lb.block_bits = block_end - 16 - search_offset;
+               lb.gap_bits = 16;
+               lb.block_flag = 4 | 1;
+               lb.sps_specific.cell_type = 1;
+               lb.encoder_type = 1;
+               lb.gap_value = fill;
+               imge_item.data_bits += lb.block_bits;
+               imge_item.gap_bits += lb.gap_bits;
+               imge_item.track_byte += (block_end - search_offset + 7) / 8;
+               list_block_descriptor.push_back(lb);
+               imge_item.block_count++;
+               search_offset = search_next_offset;
+               continue;
+            }
          }
          int end_of_block = 0;
          if (search_next_offset != -1)
