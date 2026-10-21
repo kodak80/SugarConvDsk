@@ -1823,6 +1823,12 @@ void IDisk::CreateSingleTrackFromMultiRevolutions(int side, int track)
       // Otherwise
       Track track_buffer;
 
+      // The merge below rotates / edits the revolution buffers in place : keep revolution 0 as read
+      // (index aligned) for the padded-merge fallback
+      std::vector<unsigned char> rev0_copy(side_[side].tracks[track].revolution[0].bitfield,
+                                           side_[side].tracks[track].revolution[0].bitfield +
+                                           side_[side].tracks[track].revolution[0].size);
+
       if (!CreateTrackFromRevolution(side, track))
       {
          // No sector structure to merge on : custom data-stream tracks are merged on their sync
@@ -1844,6 +1850,21 @@ void IDisk::CreateSingleTrackFromMultiRevolutions(int side, int track)
       {
          if (GetPlatform() == PLATFORM_ATARI_ST)
          {
+            // A merge much longer than one revolution has padded an area where the revolutions
+            // disagree (odd end-of-track structures). That stretches the whole track, which breaks
+            // timing checks (Speedlock). Use revolution 0 instead : with continuous decoding it is
+            // exactly one turn of the disk; fuzzy sectors are still found below by comparing fields.
+            MFMTrack& mt = side_[side].tracks[track];
+            const unsigned int rev_size = static_cast<unsigned int>(rev0_copy.size());
+            if (rev_size > 50000 && mt.size > rev_size + std::max(400u, rev_size / 200))
+            {
+               if (getenv("SUGARCONV_DEBUG_WEAK"))
+                  printf("\n padded merge %02d.%d : %u cells vs %u per revolution, using revolution 0", track, side, mt.size, rev_size);
+               delete[] mt.bitfield;
+               mt.bitfield = new unsigned char[rev_size + 32];
+               for (unsigned int i = 0; i < rev_size; i++) mt.bitfield[i] = rev0_copy[i] & 1;
+               mt.size = rev_size;
+            }
             FixIndexCrossing(side, track);
             MarkFuzzyDataFields(side, track);
          }

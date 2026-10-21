@@ -2185,11 +2185,19 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
          IDisk::FindDataFields(mt.bitfield, mt.size, fields);
          if (slow.field >= fields.size()) continue;
          const unsigned int data0 = fields[slow.field].first + 16; // first data byte, after the mark
-         // ID sync of that sector : last sector sync before its data field
+         // ID sync of that sector : the last "A1 A1 A1 FE" header before its data field
          unsigned int id_sync = (unsigned int)-1;
-         for (unsigned int q = FindNextSector(mt.bitfield, mt.size, 0, 8); q != (unsigned int)-1 && q + 32 < fields[slow.field].first;
-              q = FindNextSector(mt.bitfield, mt.size, q + 1, 8))
-            id_sync = q;
+         {
+            static const char* idam = "010001001000100101000100100010010100010010001001" "0101010101010100";
+            const unsigned int limit = fields[slow.field].first;
+            const unsigned int lo = (limit > 2000) ? limit - 2000 : 0;
+            for (unsigned int q = limit > 64 ? limit - 64 : 0; q-- > lo;)
+            {
+               bool m = true;
+               for (unsigned int i = 0; i < 64 && m; i++) m = (mt.bitfield[q + i] & 1) == (idam[i] - '0');
+               if (m) { id_sync = q; break; }
+            }
+         }
          if (id_sync == (unsigned int)-1) continue;
          const unsigned int slow_start = data0 + slow.byte_start * 16;
          const unsigned int mid = data0 + ((slow.byte_start + slow.byte_len + fast.byte_start) / 2) * 16;
