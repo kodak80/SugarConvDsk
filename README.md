@@ -82,6 +82,10 @@ Flux dumps (SCP, KryoFlux RAW stream sets, CT-RAW) of Atari ST disks can be conv
  - Copylock ST : the cell timing of each sector is measured from the flux. When the 6th sector is
    ~5% slower than the others, the track is written with the IPF "Copylock ST" density so emulators
    using the SPS library reproduce it. Set SUGARCONV_DEBUG_DENSITY=1 to print per-sector timings.
+ - Speedlock-style density keys (a slow patch followed by a fast patch inside one sector, e.g. Colorado
+   track 1) : the timing is measured inside the sector. IPF output starts the track at that sector and
+   cuts it into blocks at the patch edges, with IPF density type "Speedlock" (as in existing images of
+   these disks) ; HFE v3 output plays the patches at their measured speed.
  - Copylock ST is detected from SCP, KryoFlux and CT-RAW (CT-RAW uses its own density map).
  - Fuzzy sectors (Dungeon Master...) : every cell of a data field that is not stable across the dumped
    revolutions is written as fuzzy, so each read returns different data with a bad CRC.

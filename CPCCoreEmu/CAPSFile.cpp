@@ -1917,15 +1917,15 @@ bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, cons
 // Raw block : the cells exactly as they are (data in bits), weak cells as fuzzy runs. Used for the
 // sub-blocks of a Speedlock-style density key, where block boundaries fall inside a sector.
 static void AddRawBlock(unsigned char*& rbuf, unsigned int& rsize, unsigned int& roff, const unsigned char* cells,
-                        unsigned int from, unsigned int to)
+                        unsigned int from, unsigned int to, bool resolve_weak)
 {
    std::vector<unsigned char> ds;
    unsigned int p = from;
    while (p < to)
    {
-      const bool weak = cells[p] > 1;
+      const bool weak = !resolve_weak && cells[p] > 1;
       unsigned int e = p;
-      while (e < to && (cells[e] > 1) == weak) e++;
+      while (e < to && (!resolve_weak && cells[e] > 1) == weak) e++;
       if (weak)
       {
          PushElement(ds, 5, e - p);
@@ -2236,7 +2236,9 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
                   memset(&sub, 0, sizeof(sub));
                   sub.data_offset = data.offset;
                   sub.sps_specific.gap_offset = gap_data.offset;
-                  AddRawBlock(data.buffer, data.size, data.offset, track_field, cut[sb], cut[sb + 1]);
+                  // The key sector itself is stable on the disk : unstable cells there are splice
+                  // ambiguity in the dump, so they keep the value read (the rest of the track keeps weak bits)
+                  AddRawBlock(data.buffer, data.size, data.offset, track_field, cut[sb], cut[sb + 1], true);
                   sub.block_bits = cut[sb + 1] - cut[sb];
                   sub.gap_bits = 0;
                   sub.block_flag = 4; // sizes in bits
