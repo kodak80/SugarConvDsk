@@ -19,6 +19,8 @@ Usage : SugarConvDsk source [destination] [-s=side] [-second=path][-o=outputform
     
     -second=path : the 2nd side is replaced by the dump source specified in 'path'
 
+    -ipfraw : Write IPF tracks with the original, larger encoding (MFM cells instead of decoded bytes).
+
     -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.
 
     -p=platform : Target machine recorded in the output (IPF platform field) : ST or CPC.
@@ -87,6 +89,13 @@ Flux dumps (SCP, KryoFlux RAW stream sets, CT-RAW) of Atari ST disks can be conv
    written as plain gap, matching SPS images.
  Checked against real dumps : Defender II CT-RAW gives sector data, Copylock ST density and weak areas
  identical to the SPS IPF ; King's Quest 3 (3 disks) KryoFlux and CT-RAW give identical IPFs.
+
+IPF output stores sectors the way SPS images do : ID and data fields as decoded bytes, fuzzy bytes as
+fuzzy elements, and gaps as a fill byte plus the 00 bytes before the next sync, which the reader regenerates
+(write splices in gaps are smoothed out, as in SPS images). Blocks that can't be represented exactly this way
+(non-standard MFM, odd sector sizes, irregular gaps) keep the exact cell-level encoding. Files are about half
+the size they were : Defender II is 1,018,552 bytes against 1,017,811 for the SPS image, with identical content.
+-ipfraw restores the previous encoding.
 
 HFE output is HFE v3 (HXCHFEV3) by default, as read by FlashFloppy and the HxC tools :
  - fuzzy / weak bits are written as random-byte opcodes, so a fuzzy sector reads differently each time ;

@@ -17,6 +17,7 @@
 #include "FormatTypeDSK.h"
 #include "FormatTypeEDSK.h"
 #include "FormatTypeHFE.h"
+#include "CAPSFile.h"
 #include "FormatTypeIPF.h"
 #include "FormatTypeRAW.h"
 #include "FormatTypeSCP.h"
@@ -187,6 +188,7 @@ out:
 #include "DiskBuilder.h"
 #include "FileAccess.h"
 #include "FormatTypeHFE.h"
+#include "CAPSFile.h"
 
 
 #ifdef __unix
@@ -375,6 +377,9 @@ void PrintUsage()
 
    printf("    If this parameter is not used, default output format is IPF\n");
    printf("\n");
+   printf("    -ipfraw : Write IPF tracks with the original, larger encoding (MFM cells instead of decoded bytes).\n");
+   printf("       By default sectors are stored as decoded bytes with generated gaps, like SPS images (about half the size).\n");
+   printf("\n");
    printf("    -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.\n");
    printf("       HFE v3 keeps weak/fuzzy bits and sector speed changes (Copylock ST) ; v1 cannot.\n");
    printf("\n");
@@ -443,6 +448,10 @@ int main(int argc, char** argv)
          else if (stricmp(argv[i], "-r") == 0)
          {
             sub_dir = true;
+         }
+         else if (stricmp(argv[i], "-ipfraw") == 0)
+         {
+            CAPSFile::compact_ = false;
          }
          else if (stricmp(argv[i], "-hfev1") == 0)
          {

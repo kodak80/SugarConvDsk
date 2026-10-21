@@ -12,6 +12,9 @@ Usage : SugarConvDsk source [destination] [-s=side] [-p=platform] [-second=side_
         SCP : Supercard Pro format
     If this parameter is not used, default output format is IPF
 
+    -ipfraw : Write IPF tracks with the original, larger encoding (MFM cells instead of decoded bytes).
+       By default sectors are stored as decoded bytes with generated gaps, like SPS images (about half the size).
+
     -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.
        HFE v3 keeps weak/fuzzy bits and sector speed changes (Copylock ST) ; v1 cannot.
 

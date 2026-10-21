@@ -181,6 +181,14 @@ protected:
    unsigned int* ExtractDensity(unsigned char* buffer, int density_buf_size, DWORD ctype, DWORD cyl, DWORD head);
    int ExtractTrack(IDisk* disk, unsigned char* buffer, int density_buf_size, DWORD ctype, DWORD cyl, DWORD head);
    int AddGapRecord(StreamRecording* record, int nb_byte_to_add, unsigned char byte);
+   // SPS-style compact block : sync / decoded ID / gap / sync / decoded data (+ fuzzy runs), gap as fill
+   // byte + trailing 00 bytes. Returns false (nothing written) when the block can't be represented exactly.
+   bool AddCompactBlock(StreamRecording* data, StreamRecording* gap, const unsigned char* cells,
+                        unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor);
+public:
+   static bool compact_;          // use the compact encoder (default) ; -ipfraw disables it
+   unsigned int compact_blocks_ = 0, legacy_blocks_ = 0;
+private:
    int AddDataRecord(StreamRecording* record, unsigned char type, int nb_byte_to_add, unsigned char* buffer,
                      bool byte_size);
    int AddDataRecordInBits(StreamRecording* record, unsigned char type, unsigned int nb_byte_to_add,

@@ -1694,6 +1694,225 @@ bool CAPSFile::AddStreamRecord(StreamRecording* record, unsigned char* buffer, u
    return byte_size;
 }
 
+
+bool CAPSFile::compact_ = true;
+
+static void AppendBytes(unsigned char*& rbuf, unsigned int& rsize, unsigned int& roff, const std::vector<unsigned char>& bytes)
+{
+   while (rsize - roff <= bytes.size() + 8)
+   {
+      unsigned char* tmp = rbuf;
+      rbuf = new unsigned char[rsize * 2];
+      memcpy(rbuf, tmp, rsize);
+      rsize = rsize * 2;
+      delete[] tmp;
+   }
+   memcpy(&rbuf[roff], bytes.data(), bytes.size());
+   roff += static_cast<unsigned int>(bytes.size());
+}
+
+// Stream element : header (size width << 5 | type), size big endian, payload
+static void PushElement(std::vector<unsigned char>& out, unsigned char type, unsigned int size,
+                        const unsigned char* payload = nullptr, size_t payload_len = 0)
+{
+   unsigned char width = 1;
+   while (width < 4 && (size >> (8 * width)) != 0) width++;
+   out.push_back(static_cast<unsigned char>((width << 5) | type));
+   for (int b = width - 1; b >= 0; b--) out.push_back(static_cast<unsigned char>(size >> (8 * b)));
+   if (payload) out.insert(out.end(), payload, payload + payload_len);
+}
+
+static bool IsSync4489x3(const unsigned char* cells, unsigned int pos, unsigned int end)
+{
+   static const unsigned short sync = 0x4489;
+   if (pos + 48 > end) return false;
+   for (unsigned int i = 0; i < 48; i++)
+   {
+      const unsigned char cell = cells[pos + i];
+      if (cell > 1 || cell != ((sync >> (15 - (i & 15))) & 1)) return false;
+   }
+   return true;
+}
+
+// Decode one MFM byte at pos. Returns false if a cell is weak or a clock bit is wrong.
+static bool DecodeMfmByte(const unsigned char* cells, unsigned int pos, unsigned char& value, bool& weak)
+{
+   value = 0;
+   weak = false;
+   bool ok = true;
+   unsigned char prev = (pos > 0) ? (cells[pos - 1] & 1) : 0;
+   for (unsigned int i = 0; i < 8; i++)
+   {
+      const unsigned char c = cells[pos + 2 * i], d = cells[pos + 2 * i + 1];
+      if (c > 1 || d > 1) weak = true;
+      const unsigned char data = d & 1, clock = c & 1;
+      if (clock != ((prev == 0 && data == 0) ? 1 : 0)) ok = false;
+      value = static_cast<unsigned char>((value << 1) | data);
+      prev = data;
+   }
+   return ok && !weak;
+}
+
+bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, const unsigned char* cells,
+                               unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor)
+{
+   static const unsigned char sync_bytes[6] = {0x44, 0x89, 0x44, 0x89, 0x44, 0x89};
+   std::vector<unsigned char> ds, gs;
+   unsigned char v;
+   bool weak;
+
+   // ID field : A1 A1 A1 FE C H R N CRC CRC
+   if (!IsSync4489x3(cells, begin, end)) return false;
+   unsigned int p = begin + 48;
+   if (p + 7 * 16 > end) return false;
+   unsigned char id[7];
+   for (int i = 0; i < 7; i++, p += 16)
+   {
+      if (!DecodeMfmByte(cells, p, id[i], weak)) return false;
+   }
+   if (id[0] != 0xFE) return false;
+   PushElement(ds, 1, 6, sync_bytes, 6);
+   PushElement(ds, 2, 7, id, 7);
+
+   // Data field : look for its sync within a normal ID->data gap, byte aligned
+   unsigned int data_end = p;
+   unsigned int dsync = 0;
+   for (unsigned int q = p; q + 48 <= end && q <= p + 60 * 16; q += 16)
+   {
+      if (IsSync4489x3(cells, q, end)) { dsync = q; break; }
+   }
+   if (dsync != 0)
+   {
+      std::vector<unsigned char> mid;
+      for (unsigned int q = p; q < dsync; q += 16)
+      {
+         if (!DecodeMfmByte(cells, q, v, weak)) return false;
+         mid.push_back(v);
+      }
+      unsigned int q = dsync + 48;
+      unsigned char mark;
+      if (q + 16 > end || !DecodeMfmByte(cells, q, mark, weak) || mark < 0xF8 || mark > 0xFB) return false;
+      if ((id[4] & 0xFF) > 3) return false; // unusual sector sizes : keep the exact (legacy) encoding
+      const unsigned int nb = 1 + (128u << id[4]) + 2;
+      if (q + nb * 16 > end) return false;
+
+      if (!mid.empty()) PushElement(ds, 3, static_cast<unsigned int>(mid.size()), mid.data(), mid.size());
+      PushElement(ds, 1, 6, sync_bytes, 6);
+      // Mark + data + CRC, with fuzzy runs for weak bytes
+      std::vector<unsigned char> run;
+      unsigned int fuzzy = 0;
+      for (unsigned int i = 0; i < nb; i++, q += 16)
+      {
+         const bool ok = DecodeMfmByte(cells, q, v, weak);
+         if (weak)
+         {
+            if (!run.empty()) { PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size()); run.clear(); }
+            fuzzy++;
+            continue;
+         }
+         if (!ok) return false; // bad clock bits inside data : not plain MFM, keep it exact
+         if (fuzzy) { PushElement(ds, 5, fuzzy); fuzzy = 0; }
+         run.push_back(v);
+      }
+      if (!run.empty()) PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size());
+      if (fuzzy) PushElement(ds, 5, fuzzy);
+      data_end = q;
+   }
+   ds.push_back(0);
+
+   // Gap up to the next block : fill byte, then 00 bytes just before the next sync
+   const unsigned int gap_cells = end - data_end;
+   unsigned int zeros = 0;
+   while (gap_cells >= 16 * (zeros + 1))
+   {
+      const unsigned int z = end - 16 * (zeros + 1);
+      if (!DecodeMfmByte(cells, z, v, weak) || v != 0x00) break;
+      zeros++;
+   }
+   const unsigned int fwd_cells = gap_cells - 16 * zeros;
+   unsigned char fill = 0x4E;
+   if (fwd_cells >= 16)
+   {
+      // The forward gap must be one repeated byte. A write splice (the end of the track write, or a
+      // sector rewritten later) shifts the pattern by a few cells : allow a couple of such phase slips
+      // and a few odd bytes, which the reader regenerates as plain fill, like SPS images.
+      unsigned int counts[256] = {0}, total = 0, weak_cells = 0;
+      for (unsigned int g = data_end; g < data_end + fwd_cells; g++) if (cells[g] > 1) weak_cells++;
+      for (unsigned int g = data_end; g + 16 <= data_end + fwd_cells; g += 16)
+      {
+         unsigned char b = 0;
+         for (unsigned int i = 0; i < 8; i++) b = static_cast<unsigned char>((b << 1) | (cells[g + 2 * i + 1] & 1));
+         counts[b]++;
+         total++;
+      }
+      unsigned int best = 0;
+      for (int b = 1; b < 256; b++) if (counts[b] > counts[best]) best = b;
+      fill = static_cast<unsigned char>(best);
+
+      // Steady-state MFM cells of the fill byte repeated (its own last data bit precedes it)
+      unsigned char pattern[16];
+      unsigned char prev = fill & 1;
+      for (int i = 0; i < 8; i++)
+      {
+         const unsigned char d = (fill >> (7 - i)) & 1;
+         pattern[2 * i] = (prev == 0 && d == 0) ? 1 : 0;
+         pattern[2 * i + 1] = d;
+         prev = d;
+      }
+      auto matches = [&](unsigned int pos, unsigned int phase)
+      {
+         for (unsigned int i = 0; i < 16; i++)
+            if ((cells[pos + i] & 1) != pattern[(i + phase) & 15]) return false;
+         return true;
+      };
+      const unsigned int gap_end = data_end + fwd_cells;
+      unsigned int phase = 0, slips = 0, junk = 0, pos = data_end;
+      while (pos + 16 <= gap_end)
+      {
+         if (matches(pos, phase)) { pos += 16; continue; }
+         bool relocked = false;
+         for (unsigned int ph = 0; ph < 16 && !relocked; ph++)
+         {
+            if (pos + 32 <= gap_end && matches(pos, ph) && matches(pos + 16, ph)) { phase = ph; slips++; relocked = true; }
+         }
+         if (!relocked) { junk += 16; pos += 16; }
+      }
+      const bool regular = weak_cells <= 16 && slips <= 2 && junk <= 4 * 16;
+      if (!regular && getenv("SUGARCONV_DEBUG_COMPACT"))
+      {
+         printf("\n gap rejected: cells %u zeros %u weak %u fill %02X slips %u junk %u :", gap_cells, zeros, weak_cells, fill, slips, junk);
+         for (unsigned int g = data_end; g + 16 <= gap_end; g += 16)
+         {
+            unsigned char b = 0;
+            for (unsigned int i = 0; i < 8; i++) b = static_cast<unsigned char>((b << 1) | (cells[g + 2 * i + 1] & 1));
+            printf(" %02X", b);
+         }
+      }
+      if (!regular) return false;
+   }
+   PushElement(gs, 2, 8, &fill, 1);
+   gs.push_back(0);
+   block_descriptor.block_flag = 1;
+   if (zeros > 0)
+   {
+      static const unsigned char zero = 0;
+      PushElement(gs, 2, 8, &fill, 1);
+      PushElement(gs, 1, zeros * 8);
+      PushElement(gs, 2, 8, &zero, 1);
+      gs.push_back(0);
+      block_descriptor.block_flag |= 2;
+   }
+
+   AppendBytes(data->buffer, data->size, data->offset, ds);
+   AppendBytes(gap->buffer, gap->size, gap->offset, gs);
+   block_descriptor.block_bits = data_end - begin;
+   block_descriptor.gap_bits = gap_cells;
+   block_descriptor.sps_specific.cell_type = 1;
+   block_descriptor.encoder_type = 1;
+   block_descriptor.gap_value = 0;
+   return true;
+}
+
 int CAPSFile::AddGapRecord(StreamRecording* record, int nb_byte_to_add, unsigned char byte)
 {
    unsigned int size = 0;
@@ -1936,6 +2155,23 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
 
          unsigned int search_next_offset = FindNextSector(track_field, disk->side_[side].tracks[tr].size,
                                                           search_offset + 1, 8);
+         if (compact_)
+         {
+            const unsigned int block_end = (search_next_offset != (unsigned int)-1)
+                                              ? search_next_offset : disk->side_[side].tracks[tr].size;
+            if (AddCompactBlock(&data, &gap_data, track_field, search_offset, block_end, block_descriptor))
+            {
+               imge_item.data_bits += block_descriptor.block_bits;
+               imge_item.gap_bits += block_descriptor.gap_bits;
+               imge_item.track_byte += (block_descriptor.block_bits + block_descriptor.gap_bits) / 8;
+               list_block_descriptor.push_back(block_descriptor);
+               imge_item.block_count++;
+               compact_blocks_++;
+               search_offset = search_next_offset;
+               continue;
+            }
+            legacy_blocks_++;
+         }
          int end_of_block = 0;
          if (search_next_offset != -1)
          {
