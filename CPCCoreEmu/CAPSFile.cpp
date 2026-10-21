@@ -2226,7 +2226,7 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
             if (track_field[b] <= 1) continue;
             unsigned int e = b;
             while (e < n && track_field[e] > 1) e++;
-            if (e - b <= 16)
+            if (e - b <= 64) // up to 4 bytes of splice noise
             {
                for (unsigned int c = b; c < e; c++) track_field[c] &= 1;
             }

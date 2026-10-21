@@ -176,9 +176,50 @@ void IDisk::MarkFuzzyDataFields(int side, int track)
       if (per_rev[r].size() != merged.size()) return; // layouts differ : leave the merge alone
    }
 
+   // CRC of a data field (cells : data + CRC, starting right after the mark) in a cell buffer
+   auto field_crc_ok = [](const unsigned char* cells, unsigned int nb_cells, unsigned int start, unsigned int end)
+   {
+      if (start < 16 || end > nb_cells || end <= start + 32) return false;
+      auto byte_at = [&](unsigned int pos)
+      {
+         unsigned char b = 0;
+         for (unsigned int i = 0; i < 8; i++) b = static_cast<unsigned char>((b << 1) | (cells[pos + 2 * i + 1] & 1));
+         return b;
+      };
+      unsigned short crc = 0xFFFF;
+      auto feed = [&](unsigned char v)
+      {
+         crc ^= v << 8;
+         for (int i = 0; i < 8; i++) crc = (crc & 0x8000) ? static_cast<unsigned short>((crc << 1) ^ 0x1021) : static_cast<unsigned short>(crc << 1);
+      };
+      feed(0xA1); feed(0xA1); feed(0xA1);
+      feed(byte_at(start - 16)); // mark
+      const unsigned int nb = (end - start) / 16;
+      for (unsigned int i = 0; i + 2 < nb; i++) feed(byte_at(start + i * 16));
+      const unsigned short stored = static_cast<unsigned short>((byte_at(start + (nb - 2) * 16) << 8) | byte_at(start + (nb - 1) * 16));
+      return crc == stored;
+   };
+
    for (size_t k = 0; k < merged.size(); k++)
    {
       const unsigned int len = merged[k].second - merged[k].first;
+
+      // A field that reads with a good CRC in at least one revolution isn't fuzzy : a disagreeing
+      // revolution is a read glitch. Use the good revolution's cells and drop any weak flags.
+      int good_rev = -1;
+      for (unsigned int r = 0; r < t.nb_revolutions && good_rev < 0; r++)
+      {
+         if (per_rev[r][k].second - per_rev[r][k].first == len &&
+             field_crc_ok(t.revolution[r].bitfield, t.revolution[r].size, per_rev[r][k].first, per_rev[r][k].second))
+            good_rev = static_cast<int>(r);
+      }
+      if (good_rev >= 0)
+      {
+         const unsigned char* src = &t.revolution[good_rev].bitfield[per_rev[good_rev][k].first];
+         for (unsigned int c = 0; c < len; c++) t.bitfield[merged[k].first + c] = src[c] & 1;
+         continue;
+      }
+
       bool aligned = true;
       for (unsigned int r = 0; r < t.nb_revolutions && aligned; r++)
       {
