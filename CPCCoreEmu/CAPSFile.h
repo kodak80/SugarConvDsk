@@ -187,7 +187,7 @@ protected:
                         unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor);
 public:
    static bool compact_;          // use the compact encoder (default) ; -ipfraw disables it
-   unsigned int compact_blocks_ = 0, legacy_blocks_ = 0;
+   unsigned int compact_blocks_ = 0, legacy_blocks_ = 0, speedlock_tracks_ = 0;
 private:
    int AddDataRecord(StreamRecording* record, unsigned char type, int nb_byte_to_add, unsigned char* buffer,
                      bool byte_size);

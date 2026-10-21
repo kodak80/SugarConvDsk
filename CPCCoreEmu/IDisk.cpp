@@ -295,6 +295,16 @@ void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, uns
          {
             double sum = 0;
             for (unsigned int i = b; i < e; i++) sum += dev[i];
+            // Sharpen the edges the smoothing blurred : extend while single bytes are still past
+            // half the run's deviation (the real patch boundary is a write splice)
+            const double half = sum / (e - b) / 2;
+            unsigned int rb = b, re = e;
+            while (rb > 0 && ((half > 0 && dev[rb - 1] > half) || (half < 0 && dev[rb - 1] < half))) rb--;
+            while (re < nb_bytes && ((half > 0 && dev[re] > half) || (half < 0 && dev[re] < half))) re++;
+            b = rb;
+            e = re;
+            sum = 0;
+            for (unsigned int i = b; i < e; i++) sum += dev[i];
             IDisk::MFMTrack::DensityRun& r = track.density_runs[track.nb_density_runs++];
             r.field = static_cast<unsigned char>(k);
             // byte 0 of the field is the mark : data bytes start at 1

@@ -1913,6 +1913,36 @@ bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, cons
    return true;
 }
 
+
+// Raw block : the cells exactly as they are (data in bits), weak cells as fuzzy runs. Used for the
+// sub-blocks of a Speedlock-style density key, where block boundaries fall inside a sector.
+static void AddRawBlock(unsigned char*& rbuf, unsigned int& rsize, unsigned int& roff, const unsigned char* cells,
+                        unsigned int from, unsigned int to)
+{
+   std::vector<unsigned char> ds;
+   unsigned int p = from;
+   while (p < to)
+   {
+      const bool weak = cells[p] > 1;
+      unsigned int e = p;
+      while (e < to && (cells[e] > 1) == weak) e++;
+      if (weak)
+      {
+         PushElement(ds, 5, e - p);
+      }
+      else
+      {
+         std::vector<unsigned char> packed((e - p + 7) / 8, 0);
+         for (unsigned int i = p; i < e; i++)
+            if (cells[i] & 1) packed[(i - p) / 8] |= static_cast<unsigned char>(0x80 >> ((i - p) & 7));
+         PushElement(ds, 1, e - p, packed.data(), packed.size());
+      }
+      p = e;
+   }
+   ds.push_back(0);
+   AppendBytes(rbuf, rsize, roff, ds);
+}
+
 int CAPSFile::AddGapRecord(StreamRecording* record, int nb_byte_to_add, unsigned char byte)
 {
    unsigned int size = 0;
@@ -2088,6 +2118,44 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
       }
    }
 
+   // Speedlock-style density key (Atari ST) : a slow patch followed by a fast patch inside one
+   // sector. IPF density type 6 (Speedlock) makes the reader play block 1 slow and block 2 fast, so
+   // start the track at that sector's ID and cut the sector into 4 blocks at the patch edges.
+   unsigned int sl_cells[3] = {0, 0, 0}; // slow start, slow/fast boundary, fast end (rotated positions)
+   bool speedlock = false;
+   if (!abort && compact_ && disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST)
+   {
+      const IDisk::MFMTrack& mt = disk->side_[side].tracks[tr];
+      for (int r = 0; r + 1 < mt.nb_density_runs && !speedlock; r++)
+      {
+         const IDisk::MFMTrack::DensityRun& slow = mt.density_runs[r];
+         const IDisk::MFMTrack::DensityRun& fast = mt.density_runs[r + 1];
+         if (slow.field != fast.field || slow.permille < 25 || fast.permille > -25) continue;
+         if (fast.byte_start > slow.byte_start + slow.byte_len + 16) continue;
+         std::vector<std::pair<unsigned int, unsigned int>> fields;
+         IDisk::FindDataFields(mt.bitfield, mt.size, fields);
+         if (slow.field >= fields.size()) continue;
+         const unsigned int data0 = fields[slow.field].first + 16; // first data byte, after the mark
+         // ID sync of that sector : last sector sync before its data field
+         unsigned int id_sync = (unsigned int)-1;
+         for (unsigned int q = FindNextSector(mt.bitfield, mt.size, 0, 8); q != (unsigned int)-1 && q + 32 < fields[slow.field].first;
+              q = FindNextSector(mt.bitfield, mt.size, q + 1, 8))
+            id_sync = q;
+         if (id_sync == (unsigned int)-1) continue;
+         const unsigned int slow_start = data0 + slow.byte_start * 16;
+         const unsigned int mid = data0 + ((slow.byte_start + slow.byte_len + fast.byte_start) / 2) * 16;
+         const unsigned int fast_end = data0 + (fast.byte_start + fast.byte_len) * 16;
+         if (!(id_sync < slow_start && slow_start < mid && mid < fast_end && fast_end < mt.size)) continue;
+         imge_item.start_bit_pos = id_sync;
+         imge_item.start_byte_pos = id_sync / 8;
+         starts_with_iam = false;
+         sl_cells[0] = slow_start - id_sync;
+         sl_cells[1] = mid - id_sync;
+         sl_cells[2] = fast_end - id_sync;
+         speedlock = true;
+      }
+   }
+
    if (!abort)
    {
       track_field = new unsigned char[disk->side_[side].tracks[tr].size];
@@ -2155,6 +2223,37 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
 
          unsigned int search_next_offset = FindNextSector(track_field, disk->side_[side].tracks[tr].size,
                                                           search_offset + 1, 8);
+         if (speedlock && search_offset == 0)
+         {
+            const unsigned int block_end = (search_next_offset != (unsigned int)-1)
+                                              ? search_next_offset : disk->side_[side].tracks[tr].size;
+            if (sl_cells[2] < block_end)
+            {
+               const unsigned int cut[5] = {0, sl_cells[0], sl_cells[1], sl_cells[2], block_end};
+               for (int sb = 0; sb < 4; sb++)
+               {
+                  BlockDescriptor sub;
+                  memset(&sub, 0, sizeof(sub));
+                  sub.data_offset = data.offset;
+                  sub.sps_specific.gap_offset = gap_data.offset;
+                  AddRawBlock(data.buffer, data.size, data.offset, track_field, cut[sb], cut[sb + 1]);
+                  sub.block_bits = cut[sb + 1] - cut[sb];
+                  sub.gap_bits = 0;
+                  sub.block_flag = 4; // sizes in bits
+                  sub.sps_specific.cell_type = 1;
+                  sub.encoder_type = 1;
+                  sub.gap_value = 0x4E;
+                  imge_item.data_bits += sub.block_bits;
+                  imge_item.track_byte += (sub.block_bits + 7) / 8;
+                  list_block_descriptor.push_back(sub);
+                  imge_item.block_count++;
+               }
+               imge_item.density = 6; // Speedlock
+               speedlock_tracks_++;
+               search_offset = search_next_offset;
+               continue;
+            }
+         }
          if (compact_)
          {
             const unsigned int block_end = (search_next_offset != (unsigned int)-1)
