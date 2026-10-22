@@ -298,8 +298,31 @@ void IDisk::ClearIsolatedWeakCells(int side, int track)
       i = j;
    }
    unsigned int total = 0;
-   for (auto& r : runs) total += r.second - r.first;
+   bool slip = false;
+   for (auto& r : runs)
+   {
+      total += r.second - r.first;
+      for (unsigned int c = r.first; c < r.second; c++) if (t.bitfield[c] & BIT_OPTIONAL) slip = true;
+   }
    if (total == 0 || total > 16) return;
+   if (slip)
+   {
+      // Optional cells : the revolutions disagree on the number of cells, i.e. the drive locks onto
+      // one of two bit phases from read to read (Time disk 2 hidden sector). That is a real, variable
+      // area of the disk : keep it. SUGARCONV_WIDEN_SLIP=N (test) widens each run to N weak cells.
+      const char* w = getenv("SUGARCONV_WIDEN_SLIP");
+      const unsigned int widen = w ? static_cast<unsigned int>(atoi(w)) : 0;
+      for (auto& r : runs)
+      {
+         const unsigned int len = r.second - r.first;
+         if (len >= widen) continue;
+         const unsigned int extra = widen - len;
+         const unsigned int from = (r.first > extra / 2) ? r.first - extra / 2 : 0;
+         const unsigned int to = std::min(n, from + widen);
+         for (unsigned int c = from; c < to; c++) t.bitfield[c] |= BIT_WEAK;
+      }
+      return;
+   }
    for (auto& r : runs)
       for (unsigned int c = r.first; c < r.second; c++) t.bitfield[c] &= ~(BIT_WEAK | BIT_OPTIONAL);
 }
