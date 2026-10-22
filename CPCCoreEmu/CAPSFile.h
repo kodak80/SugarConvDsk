@@ -188,6 +188,7 @@ protected:
                         unsigned int min_gap = 0);
 public:
    static bool compact_;          // use the compact encoder (default) ; -ipfraw disables it
+   static int speedlock_density_; // IPF density type for ST Speedlock keys : 7 (+5% slow patch, default) or 6
    unsigned int compact_blocks_ = 0, legacy_blocks_ = 0, speedlock_tracks_ = 0, stream_tracks_ = 0;
 private:
    int AddDataRecord(StreamRecording* record, unsigned char type, int nb_byte_to_add, unsigned char* buffer,

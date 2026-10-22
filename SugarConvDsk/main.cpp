@@ -380,6 +380,9 @@ void PrintUsage()
    printf("    -ipfraw : Write IPF tracks with the original, larger encoding (MFM cells instead of decoded bytes).\n");
    printf("       By default sectors are stored as decoded bytes with generated gaps, like SPS images (about half the size).\n");
    printf("\n");
+   printf("    -speedlock10 : Encode Atari ST Speedlock density keys with IPF type 6 (+10%% / -10%% patches).\n");
+   printf("       By default type 7 is used (+5%% slow patch, as measured on the original disks), which some games need.\n");
+   printf("\n");
    printf("    -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.\n");
    printf("       HFE v3 keeps weak/fuzzy bits and sector speed changes (Copylock ST) ; v1 cannot.\n");
    printf("\n");
@@ -452,6 +455,10 @@ int main(int argc, char** argv)
          else if (stricmp(argv[i], "-ipfraw") == 0)
          {
             CAPSFile::compact_ = false;
+         }
+         else if (stricmp(argv[i], "-speedlock10") == 0)
+         {
+            CAPSFile::speedlock_density_ = 6;
          }
          else if (stricmp(argv[i], "-hfev1") == 0)
          {

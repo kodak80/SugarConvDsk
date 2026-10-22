@@ -1696,6 +1696,7 @@ bool CAPSFile::AddStreamRecord(StreamRecording* record, unsigned char* buffer, u
 
 
 bool CAPSFile::compact_ = true;
+int CAPSFile::speedlock_density_ = 7;
 
 static void AppendBytes(unsigned char*& rbuf, unsigned int& rsize, unsigned int& roff, const std::vector<unsigned char>& bytes)
 {
@@ -2360,7 +2361,10 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
                   list_block_descriptor.push_back(sub);
                   imge_item.block_count++;
                }
-               imge_item.density = 6; // Speedlock
+               // Speedlock key : type 7 (block 1 +5%) matches the real disks (slow patch +5%, fast patch
+               // -5%) best and is what Dragon's Breath needs ; type 6 (+10% / -10%, -speedlock10) is the
+               // layout SPS used for Colorado
+               imge_item.density = speedlock_density_;
                speedlock_tracks_++;
                search_offset = search_next_offset;
                continue;

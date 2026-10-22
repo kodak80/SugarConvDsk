@@ -15,6 +15,9 @@ Usage : SugarConvDsk source [destination] [-s=side] [-p=platform] [-second=side_
     -ipfraw : Write IPF tracks with the original, larger encoding (MFM cells instead of decoded bytes).
        By default sectors are stored as decoded bytes with generated gaps, like SPS images (about half the size).
 
+    -speedlock10 : Encode Atari ST Speedlock density keys with IPF type 6 (+10% / -10% patches).
+       By default type 7 is used (+5% slow patch, as measured on the original disks), which some games need.
+
     -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.
        HFE v3 keeps weak/fuzzy bits and sector speed changes (Copylock ST) ; v1 cannot.
 
