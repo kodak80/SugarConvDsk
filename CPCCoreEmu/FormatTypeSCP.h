@@ -48,6 +48,10 @@ public:
                         ILoadingProgress* loading_progress = nullptr);
    virtual int SaveDisk(const char* file_path, IDisk* disk, ILoadingProgress* loading_progress = nullptr) const;
 
+   // -scpnoflux : write weak areas as gaps without flux transitions (how weak bits are duplicated on a
+   // real disk : the drive reads noise there) instead of random data over several revolutions
+   static bool weak_as_noflux_;
+
 private:
    // Flux writer following the SCP image specification v2.5 : disk type, heads byte, 168-entry table,
    // FLAGS (index, normalised, 3rd-party creator), cells timed from the measured density (Copylock /

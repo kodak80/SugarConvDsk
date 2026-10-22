@@ -188,6 +188,7 @@ out:
 #include "DiskBuilder.h"
 #include "FileAccess.h"
 #include "FormatTypeHFE.h"
+#include "FormatTypeSCP.h"
 #include "CAPSFile.h"
 
 
@@ -383,6 +384,10 @@ void PrintUsage()
    printf("    -speedlock10 : Encode Atari ST Speedlock density keys with IPF type 6 (+10%% / -10%% patches).\n");
    printf("       By default type 7 is used (+5%% slow patch, as measured on the original disks), which some games need.\n");
    printf("\n");
+   printf("    -scpnoflux : Write weak / fuzzy areas of SCP files as gaps without flux transitions (one revolution),\n");
+   printf("       the way weak bits are duplicated on a real disk. Use it to write the SCP back to a floppy.\n");
+   printf("       By default they are written as random data that differs in each of 3 revolutions (emulators).\n");
+   printf("\n");
    printf("    -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.\n");
    printf("       HFE v3 keeps weak/fuzzy bits and sector speed changes (Copylock ST) ; v1 cannot.\n");
    printf("\n");
@@ -459,6 +464,10 @@ int main(int argc, char** argv)
          else if (stricmp(argv[i], "-speedlock10") == 0)
          {
             CAPSFile::speedlock_density_ = 6;
+         }
+         else if (stricmp(argv[i], "-scpnoflux") == 0)
+         {
+            FormatTypeSCP::weak_as_noflux_ = true;
          }
          else if (stricmp(argv[i], "-hfev1") == 0)
          {

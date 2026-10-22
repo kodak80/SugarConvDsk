@@ -121,7 +121,12 @@ or SuperCard Pro, or for emulators that read SCP :
  - every cell gets its measured length, so Copylock ST and Speedlock-style keys keep their timing ;
  - disks with weak bits get 3 revolutions : fuzzy areas take new random (valid MFM) data in each, and
    phase-slip areas (Time disk 2 hidden sectors) gain or lose a cell between revolutions, as on the disk ;
- - unformatted tracks are written as noise.
+ - unformatted tracks are written as noise ;
+ - -scpnoflux writes weak / fuzzy areas instead as gaps without flux transitions, in a single revolution :
+   the way weak bits are duplicated on a real disk (the drive reads noise there). Use it to write the
+   SCP back to a floppy with a Greaseweazle or SuperCard Pro. Nearby weak spots are joined and every gap
+   is at least 8 cells long. When such an image is read back (FLAGS "normalised" set), gaps of 8 cells
+   or more inside a formatted track are flagged weak again (SUGARCONV_SCP_NO_GAP_WEAK=1 disables it).
 The previous CPC SCP writer (disk type 0 = C64, heads byte "side 1 only", side 0 repeated) is kept
 behind SUGARCONV_SCP_LEGACY=1.
 SCP sources : the resolution (byte 0x0B), 8-bit cells, the extended-mode table position and the older
