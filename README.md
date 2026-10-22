@@ -84,8 +84,9 @@ Flux dumps (SCP, KryoFlux RAW stream sets, CT-RAW) of Atari ST disks can be conv
    using the SPS library reproduce it. Set SUGARCONV_DEBUG_DENSITY=1 to print per-sector timings.
  - Speedlock-style density keys (a slow patch followed by a fast patch inside one sector, e.g. Colorado
    track 1) : the timing is measured inside the sector. IPF output starts the track at that sector and
-   cuts it into blocks at the patch edges, with IPF density type "Speedlock" (as in existing images of
-   these disks) ; HFE v3 output plays the patches at their measured speed.
+   cuts it into blocks at the patch edges. IPF density type 7 is used by default (block 1 +5%, as measured
+   on the original disks, needed by Dragon's Breath) ; -speedlock10 selects type 6 (+10% / -10%, as in some
+   existing images). HFE v3 and SCP output play the patches at their measured speed.
  - Custom data-stream tracks ("Amiga tracks", MacroDOS : one sync mark then the whole track as one MFM
    stream, no sector headers, e.g. Dragon's Breath) : merged across revolutions on their sync, written as
    the sync plus decoded bytes, with the unstable write splice before the sync kept as fuzzy data.
@@ -110,6 +111,18 @@ HFE output is HFE v3 (HXCHFEV3) by default, as read by FlashFloppy and the HxC t
  - Atari ST disks are flagged with the Atari ST interface mode.
 Use -hfev1 for the original format if your emulator or firmware doesn't read v3 (weak bits and
 bit rate changes are then lost). HFE v3 files can also be read back as a source.
+
+SCP output (-o=SCP) for Atari ST disks writes a real flux image, e.g. to write a disk back with a
+Greaseweazle or SuperCard Pro, or for emulators that read SCP :
+ - Atari ST disk type, both heads or side 0 only, interleaved track table, 200 ms revolutions ;
+ - every cell gets its measured length, so Copylock ST and Speedlock-style keys keep their timing ;
+ - disks with weak bits get 3 revolutions : fuzzy areas take new random (valid MFM) data in each, and
+   phase-slip areas (Time disk 2 hidden sectors) gain or lose a cell between revolutions, as on the disk ;
+ - unformatted tracks are written as noise.
+SCP sources of Atari ST disks are decoded as one continuous flux stream cut at the index pulses (sectors
+running across the index stay intact) ; SUGARCONV_SCP_PER_REVOLUTION=1 restores the old decoding.
+IPF sources with density protections (Copylock ST, Speedlock) are given back their timing when read, so
+HFE and SCP made from an IPF keep the protection.
 
 Tests/AtariST contains a flux generator for synthetic ST disks and an IPF checker based on the SPS
 capsimage library, hfecheck.py which decodes HFE v1/v3 the way FlashFloppy does, and run_tests.sh.

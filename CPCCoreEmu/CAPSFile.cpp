@@ -537,6 +537,7 @@ bool CAPSFile::DecodeData(DataChunks item, IDisk* disk)
          int total_data = 0;
 
          unsigned int index_track = imge_item.start_bit_pos;
+         std::vector<std::pair<unsigned int, unsigned int>> block_spans; // data bits, gap bits
          for (DWORD i = 0; i < imge_item.block_count; i++)
          {
             // Read descriptors
@@ -544,6 +545,7 @@ bool CAPSFile::DecodeData(DataChunks item, IDisk* disk)
             offset += 4;
             unsigned int gap_bits = ExtractInt(&block[offset]);
             offset += 4;
+            block_spans.emplace_back(static_cast<unsigned int>(data_bits), gap_bits);
             int data_bytes = 0;
             int gap_bytes = 0;
             unsigned int gap_offset = 0;
@@ -947,6 +949,31 @@ bool CAPSFile::DecodeData(DataChunks item, IDisk* disk)
          if (index_track != imge_item.start_bit_pos || total_total != disk->side_[imge_item.side].tracks[imge_item.
             track_number].size)
          {
+         }
+
+         // Density protections : rebuild the cell timing of the original disk and measure it like a
+         // flux dump, so HFE / SCP output made from an IPF keeps the protection. Type 5 (Copylock ST) :
+         // block 5 +5%. Types 6 / 7 (Speedlock key) : block 1 +5%, block 2 -5%, as measured on the
+         // real disks (the SPS library plays +10%/-10% or +5% only, an approximation of the same key).
+         IDisk::MFMTrack& mt = disk->side_[imge_item.side].tracks[imge_item.track_number];
+         if ((imge_item.density == 5 || imge_item.density == 6 || imge_item.density == 7) && mt.bitfield && mt.size)
+         {
+            const unsigned int n = mt.size;
+            std::vector<unsigned short> cell_ns(n, 2000);
+            std::vector<unsigned char> bits(n);
+            for (unsigned int c = 0; c < n; c++) bits[c] = mt.bitfield[c] & 1;
+            unsigned int pos = imge_item.start_bit_pos % n;
+            for (size_t b = 0; b < block_spans.size(); b++)
+            {
+               int adj = 0;
+               if (imge_item.density == 5 && b == 5) adj = 100;
+               if ((imge_item.density == 6 || imge_item.density == 7) && b == 1) adj = 100;
+               if ((imge_item.density == 6 || imge_item.density == 7) && b == 2) adj = -100;
+               for (unsigned int c = 0; c < block_spans[b].first; c++)
+                  if (adj) cell_ns[(pos + c) % n] = static_cast<unsigned short>(2000 + adj);
+               pos = (pos + block_spans[b].first + block_spans[b].second) % n;
+            }
+            IDisk::MeasureSectorDensity(mt, bits.data(), n, cell_ns.data());
          }
       }
    }

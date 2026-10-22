@@ -49,6 +49,9 @@ public:
    virtual int SaveDisk(const char* file_path, IDisk* disk, ILoadingProgress* loading_progress = nullptr) const;
 
 private:
+   // Atari ST writer : real header (disk type, heads, 168-entry table), cells timed from the measured
+   // density (Copylock / Speedlock keys), weak cells randomised over several revolutions.
+   int SaveDiskST(const char* file_path, IDisk* disk) const;
    unsigned int ComputeTrack(unsigned char* bitfield, const unsigned char* cellbuffer, int size_of_buffer,
                              int duration, unsigned short* cell_ns = nullptr);
 

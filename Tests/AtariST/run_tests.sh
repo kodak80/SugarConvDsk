@@ -43,4 +43,14 @@ python3 "$HERE/mkst.py" kf --cyls 82 --spt 9 --revs 2 --copylock 0 --kf > /dev/n
 "$BIN" kf_kf/track00.0.raw kf_out -o=IPF > /dev/null || true  # exit code is 1 for KryoFlux sources
 check kf 9 2 "cyl=0-81" "00.0 .*density R6:1050" "tracks_with_errors=0"
 
+echo "== SCP writer round trip (IPF -> SCP -> IPF : Copylock timing, 82 cylinders, single side)"
+for name in copylock ds82_10 ss80_9; do
+   "$BIN" "${name}_out.IPF" "${name}_rt" -o=SCP > /dev/null || true
+   "$BIN" "${name}_rt.SCP" "${name}_rt" -o=IPF > /dev/null || true
+   cp "${name}_rt.IPF" "${name}_out.IPF"
+done
+check copylock 9 2 "00.0 .*density R6:1050" "tracks_with_errors=0"
+check ds82_10 10 2 "cyl=0-81" "tracks_with_errors=0"
+check ss80_9 9 1 "head=0-0" "tracks_with_errors=0 sectors_checked=720"
+
 [ $FAIL -eq 0 ] && echo "ALL ATARI ST TESTS PASSED" || { echo "SOME ATARI ST TESTS FAILED"; exit 1; }
