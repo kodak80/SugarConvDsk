@@ -239,6 +239,7 @@ void IDisk::MarkFuzzyDataFields(int side, int track)
          if (p < 0 || p >= static_cast<int>(rv.size)) return -1;
          return rv.bitfield[p] & 1;
       };
+      std::vector<unsigned int> unstable_cells;
       for (unsigned int w = 0; w + 16 <= len; w += 16)
       {
          unsigned int unstable_mask = 0;
@@ -263,10 +264,44 @@ void IDisk::MarkFuzzyDataFields(int side, int track)
          }
          for (unsigned int c = 0; c < 16; c++)
          {
-            if (unstable_mask & (1u << c)) t.bitfield[merged[k].first + w + c] |= BIT_WEAK;
+            if (unstable_mask & (1u << c)) unstable_cells.push_back(w + c);
          }
       }
+      // A weak-bit protection leaves dozens of unstable bytes. A handful of disagreeing cells is
+      // read noise (e.g. stray bits in the hidden Copylock short sectors, Time disk 2) : keep
+      // revolution 0's cells there, fixed, so the protection reads the same value every time.
+      if (unstable_cells.size() < 32)
+      {
+         for (unsigned int c : unstable_cells) t.bitfield[merged[k].first + c] = ref[c] & 1;
+         continue;
+      }
+      for (unsigned int c : unstable_cells) t.bitfield[merged[k].first + c] |= BIT_WEAK;
    }
+}
+
+// Weak-bit protections leave many unstable cells. A track with only a few weak cells in total
+// is read noise (a stray bit in one revolution, e.g. in the hidden Copylock short sectors
+// of Time disk 2) : left weak, the protection would read a different value each time. Fix it to
+// the merged value.
+void IDisk::ClearIsolatedWeakCells(int side, int track)
+{
+   MFMTrack& t = side_[side].tracks[track];
+   if (t.bitfield == nullptr || t.size == 0) return;
+   const unsigned int n = t.size;
+   std::vector<std::pair<unsigned int, unsigned int>> runs; // [start, end) of flagged cells
+   for (unsigned int i = 0; i < n;)
+   {
+      if (!(t.bitfield[i] & (BIT_WEAK | BIT_OPTIONAL))) { i++; continue; }
+      unsigned int j = i;
+      while (j < n && (t.bitfield[j] & (BIT_WEAK | BIT_OPTIONAL))) j++;
+      runs.push_back({i, j});
+      i = j;
+   }
+   unsigned int total = 0;
+   for (auto& r : runs) total += r.second - r.first;
+   if (total == 0 || total > 16) return;
+   for (auto& r : runs)
+      for (unsigned int c = r.first; c < r.second; c++) t.bitfield[c] &= ~(BIT_WEAK | BIT_OPTIONAL);
 }
 
 void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, unsigned int nb_bits,
@@ -1867,6 +1902,7 @@ void IDisk::CreateSingleTrackFromMultiRevolutions(int side, int track)
             }
             FixIndexCrossing(side, track);
             MarkFuzzyDataFields(side, track);
+            ClearIsolatedWeakCells(side, track);
          }
          for (unsigned int rev = 0; rev < side_[side].tracks[track].nb_revolutions; rev++)
          {
