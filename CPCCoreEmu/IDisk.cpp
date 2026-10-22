@@ -309,9 +309,11 @@ void IDisk::ClearIsolatedWeakCells(int side, int track)
    {
       // Optional cells : the revolutions disagree on the number of cells, i.e. the drive locks onto
       // one of two bit phases from read to read (Time disk 2 hidden sector). That is a real, variable
-      // area of the disk : keep it. SUGARCONV_WIDEN_SLIP=N (test) widens each run to N weak cells.
+      // area of the disk : keep it, widened to 16 weak cells so that consecutive reads always differ
+      // like the original (with 2-3 cells about one read in four repeats the previous one, and the
+      // protection fails). SUGARCONV_WIDEN_SLIP=N overrides the width (0 = keep the merged cells).
       const char* w = getenv("SUGARCONV_WIDEN_SLIP");
-      const unsigned int widen = w ? static_cast<unsigned int>(atoi(w)) : 0;
+      const unsigned int widen = w ? static_cast<unsigned int>(atoi(w)) : 16;
       for (auto& r : runs)
       {
          const unsigned int len = r.second - r.first;
