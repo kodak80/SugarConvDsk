@@ -112,15 +112,22 @@ HFE output is HFE v3 (HXCHFEV3) by default, as read by FlashFloppy and the HxC t
 Use -hfev1 for the original format if your emulator or firmware doesn't read v3 (weak bits and
 bit rate changes are then lost). HFE v3 files can also be read back as a source.
 
-SCP output (-o=SCP) for Atari ST disks writes a real flux image, e.g. to write a disk back with a
-Greaseweazle or SuperCard Pro, or for emulators that read SCP :
- - Atari ST disk type, both heads or side 0 only, interleaved track table, 200 ms revolutions ;
+SCP output (-o=SCP) follows the SuperCard Pro image specification v2.5 (Tests/AtariST/scpcheck.py
+validates a file against it). It writes a real flux image, e.g. to write a disk back with a Greaseweazle
+or SuperCard Pro, or for emulators that read SCP :
+ - disk type Atari ST SS/DS (0x14/0x15) or Amstrad CPC (0x70), heads byte (both / side 0 only, single
+   sided images use the even table entries only), 168-entry track table, 200 ms revolutions ;
+ - FLAGS : index-cued, normalised flux (generated from decoded cells), 3rd-party flux creator ;
  - every cell gets its measured length, so Copylock ST and Speedlock-style keys keep their timing ;
  - disks with weak bits get 3 revolutions : fuzzy areas take new random (valid MFM) data in each, and
    phase-slip areas (Time disk 2 hidden sectors) gain or lose a cell between revolutions, as on the disk ;
  - unformatted tracks are written as noise.
-SCP sources of Atari ST disks are decoded as one continuous flux stream cut at the index pulses (sectors
-running across the index stay intact) ; SUGARCONV_SCP_PER_REVOLUTION=1 restores the old decoding.
+The previous CPC SCP writer (disk type 0 = C64, heads byte "side 1 only", side 0 repeated) is kept
+behind SUGARCONV_SCP_LEGACY=1.
+SCP sources : the resolution (byte 0x0B), 8-bit cells, the extended-mode table position and the older
+166-entry tables are handled. Atari ST disks are decoded as one continuous flux stream cut at the index
+pulses (sectors running across the index stay intact) ; SUGARCONV_SCP_PER_REVOLUTION=1 restores the old
+decoding.
 IPF sources with density protections (Copylock ST, Speedlock) are given back their timing when read, so
 HFE and SCP made from an IPF keep the protection.
 

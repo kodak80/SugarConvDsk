@@ -49,9 +49,10 @@ public:
    virtual int SaveDisk(const char* file_path, IDisk* disk, ILoadingProgress* loading_progress = nullptr) const;
 
 private:
-   // Atari ST writer : real header (disk type, heads, 168-entry table), cells timed from the measured
-   // density (Copylock / Speedlock keys), weak cells randomised over several revolutions.
-   int SaveDiskST(const char* file_path, IDisk* disk) const;
+   // Flux writer following the SCP image specification v2.5 : disk type, heads byte, 168-entry table,
+   // FLAGS (index, normalised, 3rd-party creator), cells timed from the measured density (Copylock /
+   // Speedlock keys), weak cells randomised over several revolutions.
+   int SaveDiskFlux(const char* file_path, IDisk* disk, unsigned char disk_type) const;
    unsigned int ComputeTrack(unsigned char* bitfield, const unsigned char* cellbuffer, int size_of_buffer,
                              int duration, unsigned short* cell_ns = nullptr);
 

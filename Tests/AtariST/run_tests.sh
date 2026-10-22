@@ -46,6 +46,7 @@ check kf 9 2 "cyl=0-81" "00.0 .*density R6:1050" "tracks_with_errors=0"
 echo "== SCP writer round trip (IPF -> SCP -> IPF : Copylock timing, 82 cylinders, single side)"
 for name in copylock ds82_10 ss80_9; do
    "$BIN" "${name}_out.IPF" "${name}_rt" -o=SCP > /dev/null || true
+   python3 "$HERE/scpcheck.py" "${name}_rt.SCP" --quiet | sed "s/^/  /" || { echo "  FAIL: ${name}_rt.SCP does not follow the SCP specification"; FAIL=1; }
    "$BIN" "${name}_rt.SCP" "${name}_rt" -o=IPF > /dev/null || true
    cp "${name}_rt.IPF" "${name}_out.IPF"
 done

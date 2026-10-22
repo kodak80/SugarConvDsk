@@ -133,6 +133,30 @@ static void DecodeFluxStream(const std::vector<unsigned int>& ticks, std::vector
    cells_before[ticks.size()] = static_cast<unsigned int>(bits.size());
 }
 
+// Flux entries of one revolution as 16-bit big-endian values in 25 ns units (the layout the decoders
+// read), whatever the image's cell width (byte 0x09 : 0 = 16 bits, else bits per entry) and resolution
+// (byte 0x0B : 25 ns * (value + 1)). A zero entry is a counter overflow (spec : +65536 for 16 bits).
+static std::vector<unsigned char> NormaliseFlux(const unsigned char* data, unsigned int nb_entries,
+                                                unsigned int width_bits, unsigned int resolution)
+{
+   std::vector<unsigned char> out;
+   const unsigned int bytes_per = (width_bits == 0 || width_bits > 8) ? 2 : 1;
+   const unsigned int overflow_unit = (bytes_per == 2) ? 0x10000 : 0x100;
+   unsigned long long pending = 0;
+   for (unsigned int e = 0; e < nb_entries; e++)
+   {
+      const unsigned int v = (bytes_per == 2) ? ((data[2 * e] << 8) | data[2 * e + 1]) : data[e];
+      if (v == 0) { pending += overflow_unit; continue; }
+      unsigned long long ticks = (pending + v) * (resolution + 1ull);
+      pending = 0;
+      while (ticks >= 0x10000) { out.push_back(0); out.push_back(0); ticks -= 0x10000; }
+      if (ticks == 0) ticks = 1;
+      out.push_back(static_cast<unsigned char>(ticks >> 8));
+      out.push_back(static_cast<unsigned char>(ticks & 0xFF));
+   }
+   return out;
+}
+
 // Cell position of a moment of the stream (an index pulse)
 static unsigned int CellAt(double when, const std::vector<unsigned int>& cells_before, const std::vector<double>& end_ns)
 {
@@ -165,6 +189,11 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
       flags = header[8];
       unsigned char width = header[9];
       unsigned char nb_heads = header[0x0A];
+      const unsigned char resolution = header[0x0B];       // 25 ns * (resolution + 1)
+      if (width != 0 && width != 8 && width != 16) return FILE_ERROR; // unsupported cell width
+      const unsigned int bytes_per_entry = (width == 8) ? 1 : 2;
+      // Extended mode (FLAGS bit 6, hard / tape drive images) moves the track table to 0x80
+      const unsigned int table_base = (flags & 0x40) ? 0x80 : 0x10;
       unsigned int checkSum = *((unsigned int*)(&header[0x0C]));
 
       // Check the checksum !
@@ -190,10 +219,10 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
       unsigned int first_data = static_cast<unsigned int>(size);
       int last_used = -1;
       bool any_odd = false, any_even = false;
-      for (int i = 0; i < max_entries && 0x10 + i * 4 + 4 <= static_cast<int>(size); i++)
+      for (int i = 0; i < max_entries && table_base + i * 4 + 4 <= size; i++)
       {
-         if (0x10 + i * 4 >= static_cast<int>(first_data)) break; // table can't overlap track data
-         unsigned int off = *((unsigned int*)(&header[0x10 + i * 4]));
+         if (table_base + i * 4 >= first_data) break; // table can't overlap track data
+         unsigned int off = *((unsigned int*)(&header[table_base + i * 4]));
          if (off == 0 || off + 0x10 > size) continue;
          if (off < first_data) first_data = off;
          last_used = i;
@@ -213,7 +242,8 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
          interleaved = (nb_heads == 1) ? !any_odd : !any_even;
          only_head = nb_heads - 1;
       }
-      const bool atari_st_type = (diskType == 0x14 || diskType == 0x15); // SCP disk types : Atari ST SS / DS
+      // SCP disk types : Atari ST SS / DS (0x14 / 0x15) and HD (0x16 / 0x17, spec v2.5)
+      const bool atari_st_type = (diskType >= 0x14 && diskType <= 0x17);
       if (nb_heads == 0 && any_odd && any_even && endTrack <= 42 && !atari_st_type)
       {
          // Legacy CPC-era single-sided dump (heads byte 0, <= 43 consecutive entries) : sequential numbering,
@@ -240,7 +270,7 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
       // Track data header
       for (int i = 0; i <= last_used; i++)
       {
-         tracks_header_[i].offset = *((unsigned int*)(&header[0x10 + i * 4]));
+         tracks_header_[i].offset = *((unsigned int*)(&header[table_base + i * 4]));
 
          if (tracks_header_[i].offset != 0 && tracks_header_[i].offset + 0x10 <= size)
          {
@@ -278,13 +308,13 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
                   const unsigned int duration = *((unsigned int*)(&track_buffer[0x04 + revolution * 12]));
                   const unsigned int length = *((unsigned int*)(&track_buffer[0x08 + revolution * 12]));
                   const unsigned int offset = *((unsigned int*)(&track_buffer[0x0C + revolution * 12]));
-                  index_ns[revolution + 1] = index_ns[revolution] + duration * 25.0;
-                  if (tracks_header_[i].offset + offset + length * 2 > size) break;
-                  const unsigned char* cells = &track_buffer[offset];
+                  if (tracks_header_[i].offset + offset + length * bytes_per_entry > size) break;
+                  const std::vector<unsigned char> norm = NormaliseFlux(&track_buffer[offset], length, width, resolution);
+                  index_ns[revolution + 1] = index_ns[revolution] + duration * 25.0 * (resolution + 1);
                   unsigned int overflow = 0;
-                  for (unsigned int f = 0; f < length; f++)
+                  for (size_t f = 0; f + 1 < norm.size(); f += 2)
                   {
-                     const unsigned int v = (cells[2 * f] << 8) | cells[2 * f + 1];
+                     const unsigned int v = (norm[f] << 8) | norm[f + 1];
                      if (v == 0) { overflow += 0x10000; continue; }
                      ticks.push_back(v + overflow);
                      overflow = 0;
@@ -322,7 +352,19 @@ int FormatTypeSCP::LoadDisk(const unsigned char* buffer, size_t size, IDisk*& cr
                rpm_correction_ = (duration * 25 / 1000000) / 200.0;
 
                // Read the whole bitcells
+               if (tracks_header_[i].offset + static_cast<unsigned int>(offset) + length * bytes_per_entry > size)
+               {
+                  length = 0; // truncated image : empty revolution
+               }
+               std::vector<unsigned char> norm;
                const unsigned char* cellbuffer = &track_buffer[offset];
+               if (bytes_per_entry != 2 || resolution != 0)
+               {
+                  norm = NormaliseFlux(&track_buffer[offset], length, width, resolution);
+                  length = static_cast<int>(norm.size() / 2);
+                  duration *= (resolution + 1);
+                  cellbuffer = norm.data();
+               }
 
                // Comute size in term of bits
                new_disk->side_[side].tracks[track].revolution[revolution].size = ComputeTrack(
@@ -412,7 +454,7 @@ static void CellFactors(const IDisk::MFMTrack& t, unsigned int n, std::vector<fl
    }
 }
 
-int FormatTypeSCP::SaveDiskST(const char* file_path, IDisk* disk) const
+int FormatTypeSCP::SaveDiskFlux(const char* file_path, IDisk* disk, unsigned char disk_type) const
 {
    FILE* file;
    if (disk->SmartOpen(&file, file_path, ".SCP") != 0) return -1;
@@ -435,12 +477,15 @@ int FormatTypeSCP::SaveDiskST(const char* file_path, IDisk* disk) const
 
    std::vector<unsigned char> header(0x10 + 168 * 4, 0);
    memcpy(&header[0], "SCP", 3);
-   header[3] = 0x19;                      // version 1.9
-   header[4] = two_sides ? 0x15 : 0x14;   // Atari ST DS / SS
+   header[3] = 0x19;                      // version 1.9 (byte : version << 4 | revision)
+   header[4] = disk_type;                 // manufacturer << 4 | disk type (Atari ST 0x14/0x15, CPC 0x70)
    header[5] = static_cast<unsigned char>(nb_revs);
    header[6] = 0;                         // first track entry
    header[7] = static_cast<unsigned char>(two_sides ? nb_cyl * 2 - 1 : (nb_cyl - 1) * 2);
-   header[8] = 0x03;                      // index-cued tracks, 96 tpi
+   // FLAGS : bit 0 INDEX (each revolution starts at the index pulse), bit 3 TYPE (normalised : the flux
+   // is generated from decoded cells), bit 7 FLUX CREATOR (not made by SuperCard Pro hardware). Bit 1
+   // (96 TPI) is left clear : it only applies to 5.25" drives. Read-only image, no footer.
+   header[8] = 0x01 | 0x08 | 0x80;
    header[9] = 0;                         // 16-bit flux values
    header[10] = two_sides ? 0 : 1;        // both heads / side 0 only
    header[11] = 0;                        // 25 ns resolution
@@ -570,7 +615,14 @@ int FormatTypeSCP::SaveDiskST(const char* file_path, IDisk* disk) const
 
 int FormatTypeSCP::SaveDisk(const char* file_path, IDisk* disk, ILoadingProgress* loading_progress) const
 {
-   if (disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST) return SaveDiskST(file_path, disk);
+   const bool two_sides = disk->nb_sides_ > 1 && disk->side_[1].nb_tracks > 0;
+   if (disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST)
+      return SaveDiskFlux(file_path, disk, two_sides ? 0x15 : 0x14); // Atari ST DS / SS
+   if (!getenv("SUGARCONV_SCP_LEGACY"))
+      return SaveDiskFlux(file_path, disk, 0x70);                    // Amstrad CPC
+
+   // Previous CPC writer (SUGARCONV_SCP_LEGACY=1) : single revolution, side 0 repeated when the disk is
+   // single sided. Not conforming to the SCP specification (disk type, heads byte, flags).
 
    unsigned int checksum = 0;
    int ret = 0;
