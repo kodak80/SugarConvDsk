@@ -480,11 +480,13 @@ bool IDisk::CreateStreamTrackFromRevolutions(int side, int track)
    const unsigned int n = t.revolution[0].size;
    unsigned char* merged = new unsigned char[n + 32];
    memcpy(merged, t.revolution[0].bitfield, n);
+   std::vector<int> sync_pos{ s0 };
    for (unsigned int r = 1; r < t.nb_revolutions; r++)
    {
       unsigned int nb;
       const int sr = FindStreamSync(t.revolution[r].bitfield, t.revolution[r].size, nb);
       if (sr < 0) continue;
+      sync_pos.push_back(sr);
       const unsigned int nr = t.revolution[r].size;
       // compare from the sync onwards, wrapping around each revolution
       const unsigned int len = std::min(n, nr);
@@ -492,6 +494,28 @@ bool IDisk::CreateStreamTrackFromRevolutions(int side, int track)
       {
          const unsigned int a = (s0 + i) % n, b = (sr + i) % nr;
          if ((merged[a] & 1) != (t.revolution[r].bitfield[b] & 1)) merged[a] |= BIT_WEAK;
+      }
+   }
+   // The index pulse jitters by a few cells from one revolution to the next : the stream sync is
+   // found 942..946 cells after the index on Hot Rod, and the cells at the write splice that sit
+   // right at the index differ with it. Revolution 0 can be the extreme case ; place the index where
+   // it is on the median revolution (the most representative position of the index on the disk).
+   if (sync_pos.size() >= 3 && !getenv("SUGARCONV_STREAM_INDEX_REV0"))
+   {
+      std::vector<int> sorted = sync_pos;
+      std::sort(sorted.begin(), sorted.end());
+      const int s_med = sorted[(sorted.size() - 1) / 2];
+      const int shift = s0 - s_med;   // cells : new[i] = merged[i + shift]
+      if (shift != 0 && std::abs(shift) < 64)
+      {
+         unsigned char* rotated = new unsigned char[n + 32];
+         for (unsigned int i = 0; i < n; i++)
+            rotated[i] = merged[(i + n + shift) % n];
+         delete[] merged;
+         merged = rotated;
+         if (getenv("SUGARCONV_DEBUG_WEAK"))
+            printf("\n stream track %02d.%d : index moved %+d cells (sync at %d, median of %zu revolutions)",
+                   track, side, shift, s_med, sync_pos.size());
       }
    }
    t.bitfield = merged;

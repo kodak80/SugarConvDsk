@@ -90,6 +90,9 @@ Flux dumps (SCP, KryoFlux RAW stream sets, CT-RAW) of Atari ST disks can be conv
  - Custom data-stream tracks ("Amiga tracks", MacroDOS : one sync mark then the whole track as one MFM
    stream, no sector headers, e.g. Dragon's Breath) : merged across revolutions on their sync, written as
    the sync plus decoded bytes, with the unstable write splice before the sync kept as fuzzy data.
+   The index is placed where it is on the median revolution (the index jitters by a few cells and the
+   write splice sits on it; the first revolution of a dump is often the extreme one, which stops Hot Rod
+   from loading). SUGARCONV_STREAM_INDEX_REV0=1 keeps the index of revolution 0.
  - Copylock ST is detected from SCP, KryoFlux and CT-RAW (CT-RAW uses its own density map).
  - Fuzzy sectors (Dungeon Master...) : every cell of a data field that is not stable across the dumped
    revolutions is written as fuzzy, so each read returns different data with a bad CRC.
