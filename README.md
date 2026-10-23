@@ -93,10 +93,13 @@ Flux dumps (SCP, KryoFlux RAW stream sets, CT-RAW) of Atari ST disks can be conv
    The index is placed where it is on the median revolution (the index jitters by a few cells and the
    write splice sits on it; the first revolution of a dump is often the extreme one, which stops Hot Rod
    from loading). SUGARCONV_STREAM_INDEX_REV0=1 keeps the index of revolution 0.
-   Revolutions are compared aligned on the sync both forwards and backwards, and only cells that differ
-   both ways are weak (revolutions differ in length by a few cells, so a forward-only comparison marked
-   everything past the write splice weak : ~60 bytes per track on Hot Rod's KryoFlux dump, which lost
-   its title and splash screens in Steem SSE). SUGARCONV_STREAM_WEAK_FORWARD=1 restores the old way.
+   The gap from the write splice to the sync is weak (Hot Rod's city title screen is corrupt in Steem SSE
+   when only the splice cells vary; SUGARCONV_STREAM_WEAK_BOTHWAYS=1 marks only those), but the run of
+   0x00 bytes just before the sync stays fixed (random cells there blanked the title screen;
+   SUGARCONV_STREAM_WEAK_PRESYNC=1 allows them). The track is made a multiple of 8 cells by removing
+   or adding up to 4 cells in the middle of the splice: capsimg drops cells past the last whole byte,
+   which put the 0x00 run out of phase on KryoFlux revolutions (SUGARCONV_STREAM_KEEP_LENGTH=1 keeps
+   the dump's length).
  - Copylock ST is detected from SCP, KryoFlux and CT-RAW (CT-RAW uses its own density map).
  - Fuzzy sectors (Dungeon Master...) : every cell of a data field that is not stable across the dumped
    revolutions is written as fuzzy, so each read returns different data with a bad CRC.
