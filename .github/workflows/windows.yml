@@ -1,8 +1,8 @@
-name: Windows build
+name: Windows build (GUI branch)
 
 on:
   push:
-    branches: [ atari-st, master ]
+    branches: [ windows-gui ]
   workflow_dispatch:
 
 permissions:
@@ -24,7 +24,7 @@ jobs:
       - name: Build
         shell: bash
         run: |
-          cmake --build build --config Release --target SugarConvDsk > build.log 2>&1 || {
+          cmake --build build --config Release --target SugarConvDsk SugarConvGui > build.log 2>&1 || {
             grep -E "error" build.log | head -15 | while read -r l; do echo "::error::$l"; done
             exit 1; }
       - name: Smoke test (convert a synthetic Atari ST flux dump)
@@ -39,14 +39,17 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: SugarConvDsk-windows-x64
-          path: build/SugarConvDsk/Release/SugarConvDsk.exe
-      - name: Publish as release "windows-latest-build"
+          path: |
+            build/SugarConvDsk/Release/SugarConvDsk.exe
+            build/SugarConvGui/Release/SugarConvGui.exe
+      - name: Publish as release "windows-gui-latest-build"
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cp build/SugarConvDsk/Release/SugarConvDsk.exe SugarConvDsk.exe
-          gh release delete windows-latest-build --yes --cleanup-tag || true
-          gh release create windows-latest-build SugarConvDsk.exe --prerelease --target "$GITHUB_SHA" \
-            --title "SugarConvDsk Windows build (${GITHUB_REF_NAME})" \
-            --notes "Built from ${GITHUB_SHA} on branch ${GITHUB_REF_NAME}. 64-bit Windows command-line tool, no installer or runtime needed."
+          cp build/SugarConvGui/Release/SugarConvGui.exe SugarConvGui.exe
+          gh release delete windows-gui-latest-build --yes --cleanup-tag || true
+          gh release create windows-gui-latest-build SugarConvGui.exe SugarConvDsk.exe --prerelease --target "$GITHUB_SHA" \
+            --title "SugarConvDsk GUI test build (${GITHUB_REF_NAME})" \
+            --notes "Built from ${GITHUB_SHA} on branch ${GITHUB_REF_NAME}. SugarConvGui.exe is the Windows GUI (test build), SugarConvDsk.exe the command-line tool. 64-bit, no installer or runtime needed."
