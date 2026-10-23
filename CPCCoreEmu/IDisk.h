@@ -1,3 +1,4 @@
+#include <vector>
 #pragma once
 //////////////////////////////////////////////////////////
 // IDisk.h
@@ -58,6 +59,17 @@ public:
       FACE_2 = 2,
       FACE_BOTH = 3,
    };
+
+   // Target machine, used by writers that record it (IPF platform field, gap defaults)
+   enum Platform
+   {
+      PLATFORM_AUTO = 0,
+      PLATFORM_CPC,
+      PLATFORM_ATARI_ST
+   };
+   void SetPlatform(Platform platform) { platform_ = platform; }
+   // Explicit platform if set, otherwise a guess from the disk geometry
+   Platform GetPlatform();
 
    typedef enum
    {
@@ -139,6 +151,7 @@ public:
    virtual int CreateUnformattedTrack(int side, int track);
 
    unsigned char nb_sides_;
+   Platform platform_ = PLATFORM_AUTO;
    ILog* log_;
 
    // Used for EDSK saving
@@ -256,7 +269,36 @@ public:
       // These data are final data. Revolution will disapear !
       unsigned char* bitfield;
       unsigned int size;
+      // Cell timing of each data field, in physical order from the index, as a per-mille deviation
+      // from the track's median cell length (+50 = cells 5% longer). Filled by flux loaders only.
+      short sector_density[32];
+      unsigned char nb_sector_density;
+      // Parts of data fields written faster or slower than the rest of the track (density keys :
+      // Copylock = whole sector, Speedlock-style = a slow patch then a fast patch inside a sector).
+      struct DensityRun
+      {
+         unsigned char field;       // index of the data field on the track (FindDataFields order)
+         unsigned short byte_start; // first data byte (after the mark) of the run
+         unsigned short byte_len;
+         short permille;            // cell length deviation from the track median
+      } density_runs[16];
+      unsigned char nb_density_runs;
    } MFMTrack;
+
+   // Measure the cell length of every data field of a decoded flux revolution.
+   // bits : one cell per byte (0/1), cell_ns : PLL cell length for each of those cells (ns).
+   static void MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, unsigned int nb_bits,
+                                    const unsigned short* cell_ns);
+   // Custom data-stream tracks (sync run + long MFM stream, no sector headers)
+   static int FindStreamSync(const unsigned char* cells, unsigned int size, unsigned int& nb_syncs);
+   bool CreateStreamTrackFromRevolutions(int side, int track);
+   bool FixIndexCrossing(int side, int track);
+   // Flag cells of data fields that differ between revolutions as weak (fuzzy sectors)
+   void MarkFuzzyDataFields(int side, int track);
+   void ClearIsolatedWeakCells(int side, int track);
+   // Locate every IBM MFM data field (after A1 A1 A1 FB/F8) : [start, end) in cells, CRC included
+   static void FindDataFields(const unsigned char* bits, unsigned int nb_bits,
+                              std::vector<std::pair<unsigned int, unsigned int>>& fields);
 
    // MFM Tracks
    typedef struct

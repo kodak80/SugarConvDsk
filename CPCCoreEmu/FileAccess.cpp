@@ -86,7 +86,8 @@ std::string GetDirectoryFromPath(const char* path)
 #ifdef __MORPHOS__
    return std::string(path, PathPart(path) - path);
 #else
-   fs::path full_path(path);
+   // Absolute, so a bare file name ("track00.0.raw" run from inside the dump folder) has a directory
+   fs::path full_path = fs::absolute(fs::path(path));
    full_path.remove_filename();
    return full_path.string();
 #endif
@@ -102,7 +103,7 @@ std::string GetFullPath(const char* path)
    UnLock(lock);
    return std::string((char *)buffer);
 #else
-   fs::path full_path(path);
+   fs::path full_path = fs::absolute(fs::path(path));
    return full_path.string();
 #endif
 }

@@ -31,4 +31,7 @@ public:
    virtual int LoadDisk(const unsigned char* buffer, size_t size, IDisk*& created_disk,
                         ILoadingProgress* loading_progress = nullptr);
    virtual int SaveDisk(const char* file_path, IDisk* disk, ILoadingProgress* loading_progress = nullptr) const;
+
+   // Write the original HFE (HXCPICFE) format instead of HFE v3 (HXCHFEV3)
+   static bool write_v1_;
 };

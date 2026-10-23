@@ -502,10 +502,16 @@ int FormatTypeRAW::ComputeTrack(IDisk*& created_disk, int side, int track)
    created_disk->side_[side].tracks[track].revolution = new IDisk::Revolution[(indexNumber - 1)];
    created_disk->side_[side].tracks[track].nb_revolutions = indexNumber - 1;
 
+   if (getenv("SUGARCONV_RAW_PER_REVOLUTION") == nullptr && DecodeContinuous(created_disk, side, track))
+   {
+      return 0;
+   }
+   cell_ns_track_ = &created_disk->side_[side].tracks[track];
    for (int index_revolution = 0; index_revolution < (indexNumber - 1); index_revolution++)
    {
       DecodeFluxFromIndex(index_revolution, created_disk->side_[side].tracks[track].revolution);
    }
+   cell_ns_track_ = nullptr;
    return 0;
 }
 
@@ -520,6 +526,7 @@ int FormatTypeRAW::ComputeTrack(IDisk*& created_disk, int side, int track)
    return IDisk::GetCellWidth(celllegnth);
 }*/
 
+
 unsigned int FormatTypeRAW::DecodeFluxFromIndex(int index, IDisk::Revolution* revolution)
 {
    /*if (m_CurrentTrackLoad == 26)
@@ -529,6 +536,16 @@ unsigned int FormatTypeRAW::DecodeFluxFromIndex(int index, IDisk::Revolution* re
    revolution[index].size = ComputeTrack(index, NULL);
    revolution[index].bitfield = new unsigned char[revolution[index].size];
 
+   if (cell_ns_track_ != nullptr && index == 0)
+   {
+      // First revolution : keep the cell timing to detect density protections (Copylock ST)
+      cell_ns_ = new unsigned short[revolution[index].size];
+      revolution[index].size = ComputeTrack(index, revolution);
+      IDisk::MeasureSectorDensity(*cell_ns_track_, revolution[index].bitfield, revolution[index].size, cell_ns_);
+      delete[] cell_ns_;
+      cell_ns_ = nullptr;
+      return revolution[index].size;
+   }
    return revolution[index].size = ComputeTrack(index, revolution);
 }
 
@@ -639,6 +656,7 @@ unsigned int FormatTypeRAW::ComputeTrack(int index, IDisk::Revolution* revolutio
       if (flux >= clock / 2)
       {
          if (revolution != NULL) revolution[index].bitfield[nb_bit_in_flux] = 0;
+         if (revolution != NULL && cell_ns_ != nullptr) cell_ns_[nb_bit_in_flux] = static_cast<unsigned short>(clock);
          clocked_zeros++;
          nb_bit_in_flux++;
       }
@@ -646,6 +664,7 @@ unsigned int FormatTypeRAW::ComputeTrack(int index, IDisk::Revolution* revolutio
       {
          // Otherwise, we have a one
          if (revolution != NULL) revolution[index].bitfield[nb_bit_in_flux] = 1;
+         if (revolution != NULL && cell_ns_ != nullptr) cell_ns_[nb_bit_in_flux] = static_cast<unsigned short>(clock);
          nb_bit_in_flux++;
 
          // PLL computations HERE !
@@ -678,6 +697,7 @@ unsigned int FormatTypeRAW::ComputeTrack(int index, IDisk::Revolution* revolutio
       if (flux >= clock / 2)
       {
          if (revolution != NULL) revolution[index].bitfield[nb_bit_in_flux] = 0;
+         if (revolution != NULL && cell_ns_ != nullptr) cell_ns_[nb_bit_in_flux] = static_cast<unsigned short>(clock);
          clocked_zeros++;
          nb_bit_in_flux++;
       }
@@ -691,6 +711,7 @@ unsigned int FormatTypeRAW::ComputeTrack(int index, IDisk::Revolution* revolutio
          {
             // To check
             if (revolution != NULL) revolution[index].bitfield[nb_bit_in_flux] = 1;
+         if (revolution != NULL && cell_ns_ != nullptr) cell_ns_[nb_bit_in_flux] = static_cast<unsigned short>(clock);
             nb_bit_in_flux++;
          }
       }
@@ -891,13 +912,13 @@ FormatTypeRAW::OperationReturn FormatTypeRAW::GetFileListFromName(const char* fi
       std::string full_path = GetFullPath(file_path);
       std::string filename = GetFileFromPath(file_path);
 
-      // Search for side / tracks. Filename should be of the form xxxx[track].[side].raw. Track si 00-41, side 0-1
+      // Search for side / tracks. Filename should be of the form xxxx[track].[side].raw. Track is 00-83 (CPC 00-41), side 0-1
       // Check last 8 characters
       if (filename.size() > 8)
       {
          std::string last_part = filename.substr(filename.size() - 8, 8);
          int track, side;
-         if (sscanf(last_part.c_str(), "%i.%i.", &track, &side) != 2)
+         if (sscanf(last_part.c_str(), "%d.%d.", &track, &side) != 2) // %d, not %i : "08" must not parse as octal
          {
             // Pattern not found
             return FILE_ERROR;
@@ -1136,3 +1157,92 @@ int FormatTypeRAW::SaveDisk(const char* file_path, IDisk* disk, ILoadingProgress
 {
    return NOT_IMPLEMENTED;
 }
+
+// Decode the whole stream with one PLL and cut it at the index pulses : the cells on both sides of
+// an index then always continue each other (needed for sectors that run across the index), instead
+// of each revolution being decoded on its own with a partial cell at each end.
+bool FormatTypeRAW::DecodeContinuous(IDisk*& created_disk, int side, int track)
+{
+   const int nidx = static_cast<int>(index_list_.size());
+   if (nidx < 2 || nb_flux_value_ == 0) return false;
+   auto first_flux_at = [&](unsigned int stream_pos)
+   {
+      unsigned int k = 0;
+      while (k < nb_flux_value_ && flux_list_[k].stream_position < stream_pos) k++;
+      return k;
+   };
+   const unsigned int k_first = first_flux_at(index_list_[0].stream_position);
+   const unsigned int k_last = first_flux_at(index_list_[nidx - 1].stream_position);
+   if (k_last <= k_first + 1000 || k_last >= nb_flux_value_) return false;
+
+   std::vector<unsigned char> cells;
+   std::vector<unsigned short> cell_ns;
+   cells.reserve((k_last - k_first) * 3);
+   cell_ns.reserve((k_last - k_first) * 3);
+   std::vector<unsigned int> cells_before(k_last - k_first + 1);
+
+   int flux = 0;
+   int clock = 2000;
+   const int clock_centre = clock;
+   for (unsigned int k = k_first; k <= k_last; k++)
+   {
+      cells_before[k - k_first] = static_cast<unsigned int>(cells.size());
+      if (k == k_last) break;
+      flux += static_cast<int>((static_cast<long long>(flux_list_[k].flux_value) * SCK_PS_PER_TICK) / 1000);
+      int clocked_zeros = 0;
+      for (int guard = 0; guard < 1000; guard++)
+      {
+         flux -= clock;
+         if (flux >= clock / 2)
+         {
+            cells.push_back(0);
+            cell_ns.push_back(static_cast<unsigned short>(clock));
+            clocked_zeros++;
+            continue;
+         }
+         cells.push_back(1);
+         cell_ns.push_back(static_cast<unsigned short>(clock));
+         if (clocked_zeros >= 1 && clocked_zeros <= 3)
+         {
+            const int diff = flux / (clocked_zeros + 1);
+            clock += diff / PERIOD_ADJ_PCT;
+         }
+         else
+         {
+            clock += (clock_centre - clock) * PERIOD_ADJ_PCT / 100;
+         }
+         clock = std::max(CLOCK_MIN(clock_centre), std::min(CLOCK_MAX(clock_centre), clock));
+         flux = flux / 2;
+         break;
+      }
+   }
+
+   // Cell position of each index pulse : cells before the flux interval it falls in, plus the
+   // sample counter (time since the previous flux reversal) in cells
+   std::vector<unsigned int> index_cell(nidx);
+   for (int r = 0; r < nidx; r++)
+   {
+      const unsigned int k = first_flux_at(index_list_[r].stream_position);
+      const unsigned int base = cells_before[std::min(k, k_last) - k_first];
+      const double since = (static_cast<double>(index_list_[r].flux_value) * SCK_PS_PER_TICK) / 1000.0;
+      unsigned int c = base + static_cast<unsigned int>(since / 2000.0);
+      index_cell[r] = std::min<unsigned int>(c, static_cast<unsigned int>(cells.size()));
+   }
+
+   IDisk::MFMTrack& t = created_disk->side_[side].tracks[track];
+   t.nb_revolutions = nidx - 1;
+   t.revolution = new IDisk::Revolution[nidx - 1];
+   for (int r = 0; r < nidx - 1; r++)
+   {
+      const unsigned int a = index_cell[r], b = index_cell[r + 1];
+      t.revolution[r].size = (b > a) ? b - a : 0;
+      t.revolution[r].bitfield = new unsigned char[t.revolution[r].size + 1];
+      if (t.revolution[r].size) memcpy(t.revolution[r].bitfield, &cells[a], t.revolution[r].size);
+      if (r == 0 && t.revolution[r].size)
+      {
+         IDisk::MeasureSectorDensity(t, t.revolution[r].bitfield, t.revolution[r].size, &cell_ns[a]);
+      }
+   }
+   return true;
+}
+

@@ -1,0 +1,52 @@
+name: Windows build
+
+on:
+  push:
+    branches: [ atari-st, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -S . -B build -A x64 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded > configure.log 2>&1 || {
+            grep -iE "error|warning" configure.log | head -15 | while read -r l; do echo "::error::$l"; done
+            exit 1; }
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build build --config Release --target SugarConvDsk > build.log 2>&1 || {
+            grep -E "error" build.log | head -15 | while read -r l; do echo "::error::$l"; done
+            exit 1; }
+      - name: Smoke test (convert a synthetic Atari ST flux dump)
+        shell: bash
+        run: |
+          EXE=./build/SugarConvDsk/Release/SugarConvDsk.exe
+          python Tests/AtariST/mkst.py st_test --cyls 80 --sides 2 --spt 9 --revs 2 --copylock 0
+          $EXE st_test.scp st_test_out -o=IPF > convert.log 2>&1 || true
+          echo "::notice::$(tr -d '\r' < convert.log | tr '\n' ' ')"
+          ls -l st_test_out.IPF
+          echo "::notice::IPF size $(stat -c %s st_test_out.IPF) bytes"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SugarConvDsk-windows-x64
+          path: build/SugarConvDsk/Release/SugarConvDsk.exe
+      - name: Publish as release "windows-latest-build"
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp build/SugarConvDsk/Release/SugarConvDsk.exe SugarConvDsk.exe
+          gh release delete windows-latest-build --yes --cleanup-tag || true
+          gh release create windows-latest-build SugarConvDsk.exe --prerelease --target "$GITHUB_SHA" \
+            --title "SugarConvDsk Windows build (${GITHUB_REF_NAME})" \
+            --notes "Built from ${GITHUB_SHA} on branch ${GITHUB_REF_NAME}. 64-bit Windows command-line tool, no installer or runtime needed."

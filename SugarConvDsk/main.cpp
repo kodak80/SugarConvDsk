@@ -17,6 +17,7 @@
 #include "FormatTypeDSK.h"
 #include "FormatTypeEDSK.h"
 #include "FormatTypeHFE.h"
+#include "CAPSFile.h"
 #include "FormatTypeIPF.h"
 #include "FormatTypeRAW.h"
 #include "FormatTypeSCP.h"
@@ -186,6 +187,9 @@ out:
 #include "DiskGen.h"
 #include "DiskBuilder.h"
 #include "FileAccess.h"
+#include "FormatTypeHFE.h"
+#include "FormatTypeSCP.h"
+#include "CAPSFile.h"
 
 
 #ifdef __unix
@@ -206,6 +210,7 @@ FormatType* out_support;
 IDisk::FaceSelection face_to_convert = IDisk::FACE_BOTH;
 char filter[MAX_PATH] = {0};
 char * second_side = nullptr;
+IDisk::Platform platform_override = IDisk::PLATFORM_AUTO;
 
 int ConversionFile(fs::path& source, fs::path& destination, bool use_second_side)
 {
@@ -293,6 +298,10 @@ int ConversionFile(fs::path& source, fs::path& destination, bool use_second_side
       delete new_disk_side_2;
    }
 
+   // Target platform (IPF platform field)
+   new_disk->SetPlatform(platform_override);
+   printf("%s - ", new_disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST ? "Atari ST" : "Amstrad CPC");
+
 
    // Save with the correct format
    out_support->SaveDisk(destination.string().c_str(), new_disk);
@@ -353,7 +362,7 @@ int ConversionDirectory(fs::path& source, fs::path& destination)
 
 void PrintUsage()
 {
-   printf("Usage : SugarConvDsk source [destination] [-s=side] [-second=side_2_path][-o=outputformat] [-r] [-f=filter]\n");
+   printf("Usage : SugarConvDsk source [destination] [-s=side] [-p=platform] [-second=side_2_path][-o=outputformat] [-r] [-f=filter]\n");
    printf("    or  SugarConvDsk -cat=user [-sort] [-l] [-c] source    \n");
    printf("\n");
    printf("    -s=side : Select side of the disk to convert.\n");
@@ -368,6 +377,22 @@ void PrintUsage()
    }
 
    printf("    If this parameter is not used, default output format is IPF\n");
+   printf("\n");
+   printf("    -ipfraw : Write IPF tracks with the original, larger encoding (MFM cells instead of decoded bytes).\n");
+   printf("       By default sectors are stored as decoded bytes with generated gaps, like SPS images (about half the size).\n");
+   printf("\n");
+   printf("    -speedlock10 : Encode Atari ST Speedlock density keys with IPF type 6 (+10%% / -10%% patches).\n");
+   printf("       By default type 7 is used (+5%% slow patch, as measured on the original disks), which some games need.\n");
+   printf("\n");
+   printf("    -scpnoflux : Write weak / fuzzy areas of SCP files as gaps without flux transitions (one revolution),\n");
+   printf("       the way weak bits are duplicated on a real disk. Use it to write the SCP back to a floppy.\n");
+   printf("       By default they are written as random data that differs in each of 3 revolutions (emulators).\n");
+   printf("\n");
+   printf("    -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.\n");
+   printf("       HFE v3 keeps weak/fuzzy bits and sector speed changes (Copylock ST) ; v1 cannot.\n");
+   printf("\n");
+   printf("    -p=platform : Target machine recorded in the output (IPF platform field). ST or CPC.\n");
+   printf("       If omitted, it is guessed from the dump : more than 60 cylinders means Atari ST.\n");
    printf("\n");
    printf("   -second=side_2_path : If source is a single dump, side 1 of side_2_path will be the 2nd side of the output (it will replace any side of the regular output)\n");
    printf("    source : The source file can be in the following format : \n");
@@ -431,6 +456,30 @@ int main(int argc, char** argv)
          else if (stricmp(argv[i], "-r") == 0)
          {
             sub_dir = true;
+         }
+         else if (stricmp(argv[i], "-ipfraw") == 0)
+         {
+            CAPSFile::compact_ = false;
+         }
+         else if (stricmp(argv[i], "-speedlock10") == 0)
+         {
+            CAPSFile::speedlock_density_ = 6;
+         }
+         else if (stricmp(argv[i], "-scpnoflux") == 0)
+         {
+            FormatTypeSCP::weak_as_noflux_ = true;
+         }
+         else if (stricmp(argv[i], "-hfev1") == 0)
+         {
+            FormatTypeHFE::write_v1_ = true;
+         }
+         else if (stricmp(argv[i], "-p=ST") == 0)
+         {
+            platform_override = IDisk::PLATFORM_ATARI_ST;
+         }
+         else if (stricmp(argv[i], "-p=CPC") == 0)
+         {
+            platform_override = IDisk::PLATFORM_CPC;
          }
          else if (strnicmp(argv[i], "-f=", 3) == 0)
          {

@@ -1,4 +1,4 @@
-Usage : SugarConvDsk source [destination] [-s=side] [-second=side_2_path][-o=outputformat] [-r] [-f=filter]
+Usage : SugarConvDsk source [destination] [-s=side] [-p=platform] [-second=side_2_path][-o=outputformat] [-r] [-f=filter]
     or  SugarConvDsk -cat=user [-sort] [-l] [-c] source    
 
     -s=side : Select side of the disk to convert.
@@ -11,6 +11,22 @@ Usage : SugarConvDsk source [destination] [-s=side] [-second=side_2_path][-o=out
         IPF : IPF format
         SCP : Supercard Pro format
     If this parameter is not used, default output format is IPF
+
+    -ipfraw : Write IPF tracks with the original, larger encoding (MFM cells instead of decoded bytes).
+       By default sectors are stored as decoded bytes with generated gaps, like SPS images (about half the size).
+
+    -speedlock10 : Encode Atari ST Speedlock density keys with IPF type 6 (+10% / -10% patches).
+       By default type 7 is used (+5% slow patch, as measured on the original disks), which some games need.
+
+    -scpnoflux : Write weak / fuzzy areas of SCP files as gaps without flux transitions (one revolution),
+       the way weak bits are duplicated on a real disk. Use it to write the SCP back to a floppy.
+       By default they are written as random data that differs in each of 3 revolutions (emulators).
+
+    -hfev1 : Write HFE files in the original HFE format (HXCPICFE) instead of HFE v3.
+       HFE v3 keeps weak/fuzzy bits and sector speed changes (Copylock ST) ; v1 cannot.
+
+    -p=platform : Target machine recorded in the output (IPF platform field). ST or CPC.
+       If omitted, it is guessed from the dump : more than 60 cylinders means Atari ST.
 
    -second=side_2_path : If source is a single dump, side 1 of side_2_path will be the 2nd side of the output (it will replace any side of the regular output)
     source : The source file can be in the following format : 

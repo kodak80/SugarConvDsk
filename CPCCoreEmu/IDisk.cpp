@@ -117,6 +117,491 @@ IDisk::~IDisk()
    // todo ?
 }
 
+void IDisk::FindDataFields(const unsigned char* bits, unsigned int nb_bits,
+                           std::vector<std::pair<unsigned int, unsigned int>>& fields)
+{
+   fields.clear();
+   if (bits == nullptr || nb_bits < 64) return;
+
+   static const unsigned short sync = 0x4489; // A1 with missing clock
+   auto word_at = [&](unsigned int p)
+   {
+      unsigned short w = 0;
+      for (unsigned int i = 0; i < 16; i++) w = (w << 1) | ((bits[p + i] & 1) ? 1 : 0);
+      return w;
+   };
+   auto byte_at = [&](unsigned int p) // data bits are the odd cells of an MFM word
+   {
+      unsigned char b = 0;
+      for (unsigned int i = 0; i < 8; i++) b = (b << 1) | ((bits[p + i * 2 + 1] & 1) ? 1 : 0);
+      return b;
+   };
+
+   unsigned int size_code = 2;
+   for (unsigned int p = 0; p + 64 < nb_bits; p++)
+   {
+      if (word_at(p) != sync || word_at(p + 16) != sync || word_at(p + 32) != sync) continue;
+      unsigned int mark_pos = p + 48;
+      unsigned char mark = byte_at(mark_pos);
+      if (mark == 0xFE && mark_pos + 16 * 5 < nb_bits)
+      {
+         size_code = byte_at(mark_pos + 16 * 4) & 3;
+      }
+      else if (mark == 0xFB || mark == 0xF8)
+      {
+         unsigned int start = mark_pos + 16;
+         unsigned int end = start + ((128u << size_code) + 2) * 16; // data + CRC
+         if (end > nb_bits) end = nb_bits;
+         fields.emplace_back(start, end);
+      }
+      p = mark_pos;
+   }
+}
+
+// Fuzzy sectors (Dungeon Master, ...) : some cells of a data field read differently on every
+// revolution, scattered over the sector. The generic merge only flags the spots where it lost sync,
+// so compare each data field cell by cell across all revolutions and flag every cell that is not
+// stable as weak. Only done when the field has the same length in every revolution, so cells line up.
+void IDisk::MarkFuzzyDataFields(int side, int track)
+{
+   MFMTrack& t = side_[side].tracks[track];
+   if (t.nb_revolutions < 2 || t.bitfield == nullptr) return;
+
+   std::vector<std::pair<unsigned int, unsigned int>> merged;
+   FindDataFields(t.bitfield, t.size, merged);
+   std::vector<std::vector<std::pair<unsigned int, unsigned int>>> per_rev(t.nb_revolutions);
+   for (unsigned int r = 0; r < t.nb_revolutions; r++)
+   {
+      FindDataFields(t.revolution[r].bitfield, t.revolution[r].size, per_rev[r]);
+      if (per_rev[r].size() != merged.size()) return; // layouts differ : leave the merge alone
+   }
+
+   // CRC of a data field (cells : data + CRC, starting right after the mark) in a cell buffer
+   auto field_crc_ok = [](const unsigned char* cells, unsigned int nb_cells, unsigned int start, unsigned int end)
+   {
+      if (start < 16 || end > nb_cells || end <= start + 32) return false;
+      auto byte_at = [&](unsigned int pos)
+      {
+         unsigned char b = 0;
+         for (unsigned int i = 0; i < 8; i++) b = static_cast<unsigned char>((b << 1) | (cells[pos + 2 * i + 1] & 1));
+         return b;
+      };
+      unsigned short crc = 0xFFFF;
+      auto feed = [&](unsigned char v)
+      {
+         crc ^= v << 8;
+         for (int i = 0; i < 8; i++) crc = (crc & 0x8000) ? static_cast<unsigned short>((crc << 1) ^ 0x1021) : static_cast<unsigned short>(crc << 1);
+      };
+      feed(0xA1); feed(0xA1); feed(0xA1);
+      feed(byte_at(start - 16)); // mark
+      const unsigned int nb = (end - start) / 16;
+      for (unsigned int i = 0; i + 2 < nb; i++) feed(byte_at(start + i * 16));
+      const unsigned short stored = static_cast<unsigned short>((byte_at(start + (nb - 2) * 16) << 8) | byte_at(start + (nb - 1) * 16));
+      return crc == stored;
+   };
+
+   for (size_t k = 0; k < merged.size(); k++)
+   {
+      const unsigned int len = merged[k].second - merged[k].first;
+
+      // A field that reads with a good CRC in at least one revolution isn't fuzzy : a disagreeing
+      // revolution is a read glitch. Use the good revolution's cells and drop any weak flags.
+      int good_rev = -1;
+      for (unsigned int r = 0; r < t.nb_revolutions && good_rev < 0; r++)
+      {
+         if (per_rev[r][k].second - per_rev[r][k].first == len &&
+             field_crc_ok(t.revolution[r].bitfield, t.revolution[r].size, per_rev[r][k].first, per_rev[r][k].second))
+            good_rev = static_cast<int>(r);
+      }
+      if (good_rev >= 0)
+      {
+         const unsigned char* src = &t.revolution[good_rev].bitfield[per_rev[good_rev][k].first];
+         for (unsigned int c = 0; c < len; c++) t.bitfield[merged[k].first + c] = src[c] & 1;
+         continue;
+      }
+
+      bool aligned = true;
+      for (unsigned int r = 0; r < t.nb_revolutions && aligned; r++)
+      {
+         if (per_rev[r][k].second - per_rev[r][k].first != len) aligned = false;
+      }
+      if (!aligned) continue;
+
+      // Compare 16-cell words. A revolution may slip by a cell or two inside a fuzzy area (the PLL or
+      // the dumping software resyncs differently), so each revolution keeps its own small offset,
+      // re-locked whenever a shifted word matches the reference exactly.
+      const unsigned char* ref = &t.revolution[0].bitfield[per_rev[0][k].first];
+      std::vector<int> shift(t.nb_revolutions, 0);
+      auto cell = [&](unsigned int r, int pos) -> int
+      {
+         const IDisk::Revolution& rv = t.revolution[r];
+         int p = static_cast<int>(per_rev[r][k].first) + pos;
+         if (p < 0 || p >= static_cast<int>(rv.size)) return -1;
+         return rv.bitfield[p] & 1;
+      };
+      std::vector<unsigned int> unstable_cells;
+      for (unsigned int w = 0; w + 16 <= len; w += 16)
+      {
+         unsigned int unstable_mask = 0;
+         for (unsigned int r = 1; r < t.nb_revolutions; r++)
+         {
+            auto mismatch = [&](int sh)
+            {
+               unsigned int m = 0;
+               for (unsigned int c = 0; c < 16; c++)
+                  if (cell(r, static_cast<int>(w + c) + sh) != (ref[w + c] & 1)) m |= 1u << c;
+               return m;
+            };
+            unsigned int m = mismatch(shift[r]);
+            if (m != 0)
+            {
+               for (int d : {-1, 1, -2, 2})
+               {
+                  if (mismatch(shift[r] + d) == 0) { shift[r] += d; m = 0; break; }
+               }
+            }
+            unstable_mask |= m;
+         }
+         for (unsigned int c = 0; c < 16; c++)
+         {
+            if (unstable_mask & (1u << c)) unstable_cells.push_back(w + c);
+         }
+      }
+      // A weak-bit protection leaves dozens of unstable bytes. A handful of disagreeing cells is
+      // read noise (e.g. stray bits in the hidden Copylock short sectors, Time disk 2) : keep
+      // revolution 0's cells there, fixed, so the protection reads the same value every time.
+      if (unstable_cells.size() < 32)
+      {
+         for (unsigned int c : unstable_cells) t.bitfield[merged[k].first + c] = ref[c] & 1;
+         continue;
+      }
+      for (unsigned int c : unstable_cells) t.bitfield[merged[k].first + c] |= BIT_WEAK;
+   }
+}
+
+// Weak-bit protections leave many unstable cells. A track with only a few weak cells in total
+// is read noise (a stray bit in one revolution, e.g. in the hidden Copylock short sectors
+// of Time disk 2) : left weak, the protection would read a different value each time. Fix it to
+// the merged value.
+void IDisk::ClearIsolatedWeakCells(int side, int track)
+{
+   MFMTrack& t = side_[side].tracks[track];
+   if (t.bitfield == nullptr || t.size == 0) return;
+   const unsigned int n = t.size;
+   std::vector<std::pair<unsigned int, unsigned int>> runs; // [start, end) of flagged cells
+   for (unsigned int i = 0; i < n;)
+   {
+      if (!(t.bitfield[i] & (BIT_WEAK | BIT_OPTIONAL))) { i++; continue; }
+      unsigned int j = i;
+      while (j < n && (t.bitfield[j] & (BIT_WEAK | BIT_OPTIONAL))) j++;
+      runs.push_back({i, j});
+      i = j;
+   }
+   unsigned int total = 0;
+   bool slip = false;
+   for (auto& r : runs)
+   {
+      total += r.second - r.first;
+      for (unsigned int c = r.first; c < r.second; c++) if (t.bitfield[c] & BIT_OPTIONAL) slip = true;
+   }
+   if (total == 0 || total > 16) return;
+   if (slip)
+   {
+      // Optional cells : the revolutions disagree on the number of cells, i.e. the drive locks onto
+      // one of two bit phases from read to read (Time disk 2 hidden sector). That is a real, variable
+      // area of the disk : keep it, widened to 16 weak cells so that consecutive reads always differ
+      // like the original (with 2-3 cells about one read in four repeats the previous one, and the
+      // protection fails). SUGARCONV_WIDEN_SLIP=N overrides the width (0 = keep the merged cells).
+      const char* w = getenv("SUGARCONV_WIDEN_SLIP");
+      const unsigned int widen = w ? static_cast<unsigned int>(atoi(w)) : 16;
+      for (auto& r : runs)
+      {
+         const unsigned int len = r.second - r.first;
+         if (len >= widen) continue;
+         const unsigned int extra = widen - len;
+         const unsigned int from = (r.first > extra / 2) ? r.first - extra / 2 : 0;
+         const unsigned int to = std::min(n, from + widen);
+         for (unsigned int c = from; c < to; c++) t.bitfield[c] |= BIT_WEAK;
+      }
+      return;
+   }
+   for (auto& r : runs)
+      for (unsigned int c = r.first; c < r.second; c++) t.bitfield[c] &= ~(BIT_WEAK | BIT_OPTIONAL);
+}
+
+void IDisk::MeasureSectorDensity(MFMTrack& track, const unsigned char* bits, unsigned int nb_bits,
+                                 const unsigned short* cell_ns)
+{
+   track.nb_sector_density = 0;
+   track.nb_density_runs = 0;
+   if (bits == nullptr || cell_ns == nullptr) return;
+
+   std::vector<std::pair<unsigned int, unsigned int>> fields;
+   FindDataFields(bits, nb_bits, fields);
+
+   double mean[32];
+   int nb = 0;
+   for (auto& f : fields)
+   {
+      if (nb >= 32) break;
+      unsigned int end = (f.second >= f.first + 32) ? f.second - 32 : f.second; // data only, no CRC
+      if (end <= f.first + 256) continue;
+      double sum = 0;
+      for (unsigned int c = f.first; c < end; c++) sum += cell_ns[c];
+      mean[nb++] = sum / (end - f.first);
+   }
+   if (nb == 0) return;
+
+   double sorted[32];
+   memcpy(sorted, mean, sizeof(double) * nb);
+   std::sort(sorted, sorted + nb);
+   double median = sorted[nb / 2];
+   for (int i = 0; i < nb; i++)
+   {
+      track.sector_density[i] = static_cast<short>((mean[i] / median - 1.0) * 1000.0);
+   }
+   track.nb_sector_density = static_cast<unsigned char>(nb);
+
+   // Runs inside each data field : per-byte cell length, smoothed over 16 bytes, grouped where it
+   // stays at least 2.5% away from the median for 32 bytes or more.
+   for (size_t k = 0; k < fields.size() && track.nb_density_runs < 16; k++)
+   {
+      const unsigned int first = fields[k].first;
+      const unsigned int nb_bytes = (fields[k].second - first) / 16;
+      if (nb_bytes < 64) continue;
+      std::vector<double> dev(nb_bytes);
+      for (unsigned int b = 0; b < nb_bytes; b++)
+      {
+         double sum = 0;
+         for (unsigned int c = 0; c < 16; c++) sum += cell_ns[first + b * 16 + c];
+         dev[b] = (sum / 16) / median - 1.0;
+      }
+      std::vector<double> smooth(nb_bytes);
+      for (unsigned int b = 0; b < nb_bytes; b++)
+      {
+         const unsigned int lo = (b >= 8) ? b - 8 : 0, hi = std::min(nb_bytes, b + 8);
+         double sum = 0;
+         for (unsigned int i = lo; i < hi; i++) sum += dev[i];
+         smooth[b] = sum / (hi - lo);
+      }
+      unsigned int b = 0;
+      while (b < nb_bytes && track.nb_density_runs < 16)
+      {
+         const int sign = (smooth[b] >= 0.025) ? 1 : (smooth[b] <= -0.025) ? -1 : 0;
+         unsigned int e = b + 1;
+         while (e < nb_bytes && ((sign > 0 && smooth[e] >= 0.025) || (sign < 0 && smooth[e] <= -0.025) ||
+                                 (sign == 0 && smooth[e] > -0.025 && smooth[e] < 0.025)))
+            e++;
+         if (sign != 0 && e - b >= 32)
+         {
+            double sum = 0;
+            for (unsigned int i = b; i < e; i++) sum += dev[i];
+            // Sharpen the edges the smoothing blurred : extend while single bytes are still past
+            // half the run's deviation (the real patch boundary is a write splice)
+            const double half = sum / (e - b) / 2;
+            unsigned int rb = b, re = e;
+            while (rb > 0 && ((half > 0 && dev[rb - 1] > half) || (half < 0 && dev[rb - 1] < half))) rb--;
+            while (re < nb_bytes && ((half > 0 && dev[re] > half) || (half < 0 && dev[re] < half))) re++;
+            b = rb;
+            e = re;
+            sum = 0;
+            for (unsigned int i = b; i < e; i++) sum += dev[i];
+            IDisk::MFMTrack::DensityRun& r = track.density_runs[track.nb_density_runs++];
+            r.field = static_cast<unsigned char>(k);
+            // byte 0 of the field is the mark : data bytes start at 1
+            r.byte_start = static_cast<unsigned short>(b > 0 ? b - 1 : 0);
+            r.byte_len = static_cast<unsigned short>(e - b);
+            r.permille = static_cast<short>(sum / (e - b) * 1000.0);
+         }
+         b = e;
+      }
+   }
+
+   if (getenv("SUGARCONV_DEBUG_DENSITY"))
+   {
+      printf("\n density median %.1f ns :", median);
+      for (int i = 0; i < nb; i++) printf(" %+d", track.sector_density[i]);
+      for (int i = 0; i < track.nb_density_runs; i++)
+         printf(" [field %d bytes %d-%d %+d]", track.density_runs[i].field, track.density_runs[i].byte_start,
+                track.density_runs[i].byte_start + track.density_runs[i].byte_len - 1, track.density_runs[i].permille);
+   }
+}
+
+
+// Sync run (4489 repeated) followed by >= 64 valid MFM bytes : start of a custom data-stream track.
+int IDisk::FindStreamSync(const unsigned char* cells, unsigned int size, unsigned int& nb_syncs)
+{
+   static const char* sync = "0100010010001001";
+   auto valid_byte = [&](unsigned int q)
+   {
+      unsigned char prev = (q > 0) ? (cells[q - 1] & 1) : 0;
+      for (unsigned int i = 0; i < 8; i++)
+      {
+         const unsigned char c = cells[q + 2 * i] & 1, d = cells[q + 2 * i + 1] & 1;
+         if (cells[q + 2 * i] > 1 || cells[q + 2 * i + 1] > 1) return true; // weak : tolerated
+         if (c != ((prev == 0 && d == 0) ? 1 : 0)) return false;
+         prev = d;
+      }
+      return true;
+   };
+   int best = -1;
+   unsigned int best_len = 0;
+   for (unsigned int p = 0; p + 16 <= size; p++)
+   {
+      bool m = true;
+      for (unsigned int i = 0; i < 16 && m; i++) m = cells[p + i] <= 1 && (cells[p + i] & 1) == (sync[i] - '0');
+      if (!m) continue;
+      unsigned int k = 1;
+      while (p + 16 * (k + 1) <= size)
+      {
+         bool mm = true;
+         for (unsigned int i = 0; i < 16 && mm; i++) mm = (cells[p + 16 * k + i] & 1) == (sync[i] - '0');
+         if (!mm) break;
+         k++;
+      }
+      unsigned int q = p + 16 * k, good = 0;
+      while (q + 16 <= size && good < 64 && valid_byte(q)) { good++; q += 16; }
+      if (good >= 64 && k > best_len) { best = static_cast<int>(p); best_len = k; }
+      p += 16 * k - 1;
+   }
+   nb_syncs = best_len;
+   return best;
+}
+
+// Merge of a data-stream track : revolution 0 as reference, the other revolutions aligned on the
+// stream sync; cells that differ are weak. Returns false if revolution 0 isn't a stream track.
+bool IDisk::CreateStreamTrackFromRevolutions(int side, int track)
+{
+   MFMTrack& t = side_[side].tracks[track];
+   if (t.nb_revolutions == 0 || t.revolution[0].bitfield == nullptr) return false;
+   unsigned int nb0;
+   const int s0 = FindStreamSync(t.revolution[0].bitfield, t.revolution[0].size, nb0);
+   if (s0 < 0) return false;
+   const unsigned int n = t.revolution[0].size;
+   unsigned char* merged = new unsigned char[n + 32];
+   memcpy(merged, t.revolution[0].bitfield, n);
+   std::vector<int> sync_pos{ s0 };
+   for (unsigned int r = 1; r < t.nb_revolutions; r++)
+   {
+      unsigned int nb;
+      const int sr = FindStreamSync(t.revolution[r].bitfield, t.revolution[r].size, nb);
+      if (sr < 0) continue;
+      sync_pos.push_back(sr);
+      const unsigned int nr = t.revolution[r].size;
+      // compare from the sync onwards, wrapping around each revolution
+      const unsigned int len = std::min(n, nr);
+      for (unsigned int i = 0; i < len; i++)
+      {
+         const unsigned int a = (s0 + i) % n, b = (sr + i) % nr;
+         if ((merged[a] & 1) != (t.revolution[r].bitfield[b] & 1)) merged[a] |= BIT_WEAK;
+      }
+   }
+   // The index pulse jitters by a few cells from one revolution to the next : the stream sync is
+   // found 942..946 cells after the index on Hot Rod, and the cells at the write splice that sit
+   // right at the index differ with it. Revolution 0 can be the extreme case ; place the index where
+   // it is on the median revolution (the most representative position of the index on the disk).
+   if (sync_pos.size() >= 3 && !getenv("SUGARCONV_STREAM_INDEX_REV0"))
+   {
+      std::vector<int> sorted = sync_pos;
+      std::sort(sorted.begin(), sorted.end());
+      const int s_med = sorted[(sorted.size() - 1) / 2];
+      const int shift = s0 - s_med;   // cells : new[i] = merged[i + shift]
+      if (shift != 0 && std::abs(shift) < 64)
+      {
+         unsigned char* rotated = new unsigned char[n + 32];
+         for (unsigned int i = 0; i < n; i++)
+            rotated[i] = merged[(i + n + shift) % n];
+         delete[] merged;
+         merged = rotated;
+         if (getenv("SUGARCONV_DEBUG_WEAK"))
+            printf("\n stream track %02d.%d : index moved %+d cells (sync at %d, median of %zu revolutions)",
+                   track, side, shift, s_med, sync_pos.size());
+      }
+   }
+   t.bitfield = merged;
+   t.size = n;
+   return true;
+}
+
+
+// A sector that runs across the index (tight 11-sector tracks) is only readable if the track closes
+// on itself exactly : the cells after the index must continue the cells before it. Revolutions are
+// decoded index to index, and the flux interval that straddles the index can come out as one cell
+// too many or too few. When a data field crosses the index, try trimming / padding the end of the
+// track by up to 3 cells and keep the length whose join is valid MFM inside that field.
+bool IDisk::FixIndexCrossing(int side, int track)
+{
+   MFMTrack& t = side_[side].tracks[track];
+   if (t.bitfield == nullptr || t.size < 1000) return false;
+   const unsigned int n = t.size;
+   std::vector<unsigned char> ring(2 * n + 8);
+   for (unsigned int i = 0; i < n; i++) ring[i] = ring[n + i] = t.bitfield[i] & 1;
+   std::vector<std::pair<unsigned int, unsigned int>> fields;
+   FindDataFields(ring.data(), 2 * n, fields);
+   unsigned int f_start = 0, f_end = 0;
+   for (auto& f : fields) if (f.first < n && f.second > n) { f_start = f.first; f_end = f.second; }
+   if (f_end == 0) return false;
+
+   // MFM clock violations from just before the index to the end of the crossing field, for a track
+   // shortened (d < 0) or lengthened (d > 0, repeating the last cell value 0) by |d| cells
+   auto violations = [&](int d)
+   {
+      const unsigned int len = n + d;
+      auto cell = [&](unsigned int pos) -> unsigned char
+      {
+         pos %= len;
+         return (pos < n) ? (t.bitfield[pos] & 1) : 0;
+      };
+      // first cell of the crossing field in the adjusted ring (unchanged : it starts before the index)
+      unsigned int bad = 0;
+      const unsigned int from = std::max(f_start, n - 64) & ~1u;
+      // phase : data cells are odd relative to the field start
+      unsigned int phase = (f_start + 1) & 1;
+      const unsigned int to = f_end + (d > 0 ? d : 0) - (d < 0 ? -d : 0);
+      unsigned char prev = 0;
+      for (unsigned int pos = from; pos + 1 < to; pos++)
+      {
+         if (((pos - f_start) & 1) != 0) { prev = cell(pos); continue; } // data cell
+         const unsigned char c = cell(pos), dd = cell(pos + 1);
+         if (c != ((prev == 0 && dd == 0) ? 1 : 0)) bad++;
+         (void)phase;
+      }
+      return bad;
+   };
+   int best_d = 0;
+   unsigned int best = violations(0);
+   // smallest correction first : shifting by 2 cells also gives valid MFM (data moved by one bit),
+   // so among equally clean joins the nearest length wins
+   for (int d : {-1, 1, -2, 2, -3, 3})
+   {
+      const unsigned int v = violations(d);
+      if (v < best) { best = v; best_d = d; }
+   }
+   if (getenv("SUGARCONV_DEBUG_WEAK"))
+      printf("\n index crossing %02d.%d : join violations %u at length %+d (were %u)", track, side, best, best_d, violations(0));
+   if (best_d == 0) return false;
+   unsigned char* nb = new unsigned char[n + best_d + 32];
+   if (best_d < 0) memcpy(nb, t.bitfield, n + best_d);
+   else { memcpy(nb, t.bitfield, n); memset(nb + n, 0, best_d); }
+   delete[] t.bitfield;
+   t.bitfield = nb;
+   t.size = n + best_d;
+   return true;
+}
+
+IDisk::Platform IDisk::GetPlatform()
+{
+   if (platform_ != PLATFORM_AUTO) return platform_;
+
+   // CPC 3" disks stay under ~46 cylinders (some protected ones use 44-45); Atari ST disks are 80-84.
+   unsigned int max_track = 0;
+   for (int side = 0; side < nb_sides_ && side < 2; side++)
+   {
+      if (side_[side].nb_tracks > max_track) max_track = side_[side].nb_tracks;
+   }
+   return (max_track > 60) ? PLATFORM_ATARI_ST : PLATFORM_CPC;
+}
+
 
 IDisk::FaceSelection IDisk::FilterSide(IDisk::FaceSelection faceSelection)
 {
@@ -1422,8 +1907,16 @@ void IDisk::CreateSingleTrackFromMultiRevolutions(int side, int track)
       // Otherwise
       Track track_buffer;
 
+      // The merge below rotates / edits the revolution buffers in place : keep revolution 0 as read
+      // (index aligned) for the padded-merge fallback
+      std::vector<unsigned char> rev0_copy(side_[side].tracks[track].revolution[0].bitfield,
+                                           side_[side].tracks[track].revolution[0].bitfield +
+                                           side_[side].tracks[track].revolution[0].size);
+
       if (!CreateTrackFromRevolution(side, track))
       {
+         // No sector structure to merge on : custom data-stream tracks are merged on their sync
+         const bool stream = CreateStreamTrackFromRevolutions(side, track);
          for (unsigned int rev = 0; rev < side_[side].tracks[track].nb_revolutions; rev++)
          {
             delete[]side_[side].tracks[track].revolution[rev].bitfield;
@@ -1431,11 +1924,35 @@ void IDisk::CreateSingleTrackFromMultiRevolutions(int side, int track)
          delete[]side_[side].tracks[track].revolution;
          side_[side].tracks[track].revolution = nullptr;
          side_[side].tracks[track].nb_revolutions = 0;
-         side_[side].tracks[track].bitfield = nullptr;
-         side_[side].tracks[track].size = 0;
+         if (!stream)
+         {
+            side_[side].tracks[track].bitfield = nullptr;
+            side_[side].tracks[track].size = 0;
+         }
       }
       else
       {
+         if (GetPlatform() == PLATFORM_ATARI_ST)
+         {
+            // A merge much longer than one revolution has padded an area where the revolutions
+            // disagree (odd end-of-track structures). That stretches the whole track, which breaks
+            // timing checks (Speedlock). Use revolution 0 instead : with continuous decoding it is
+            // exactly one turn of the disk; fuzzy sectors are still found below by comparing fields.
+            MFMTrack& mt = side_[side].tracks[track];
+            const unsigned int rev_size = static_cast<unsigned int>(rev0_copy.size());
+            if (rev_size > 50000 && mt.size > rev_size + std::max(400u, rev_size / 200))
+            {
+               if (getenv("SUGARCONV_DEBUG_WEAK"))
+                  printf("\n padded merge %02d.%d : %u cells vs %u per revolution, using revolution 0", track, side, mt.size, rev_size);
+               delete[] mt.bitfield;
+               mt.bitfield = new unsigned char[rev_size + 32];
+               for (unsigned int i = 0; i < rev_size; i++) mt.bitfield[i] = rev0_copy[i] & 1;
+               mt.size = rev_size;
+            }
+            FixIndexCrossing(side, track);
+            MarkFuzzyDataFields(side, track);
+            ClearIsolatedWeakCells(side, track);
+         }
          for (unsigned int rev = 0; rev < side_[side].tracks[track].nb_revolutions; rev++)
          {
             delete[]side_[side].tracks[track].revolution[rev].bitfield;

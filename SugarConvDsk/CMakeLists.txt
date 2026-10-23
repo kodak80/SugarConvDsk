@@ -73,6 +73,9 @@ include_directories (SugarConvDsk
 					 )
 
 if(MSVC)
+	# C++17 for std::filesystem, static runtime so the .exe runs without the VC++ redistributable
+	target_compile_options ( SugarConvDsk PRIVATE /std:c++17 /utf-8 )
+	set_property ( TARGET SugarConvDsk PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" )
 	target_link_libraries ( SugarConvDsk zlibstatic)
 else ()
 	target_link_libraries ( SugarConvDsk  m stdc++fs libz.a)

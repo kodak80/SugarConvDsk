@@ -1,5 +1,7 @@
 #include "stdafx.h"
 #include "CAPSFile.h"
+#include <algorithm>
+#include <vector>
 
 #include "CRC.h"
 #include "FDC765.h"
@@ -535,6 +537,7 @@ bool CAPSFile::DecodeData(DataChunks item, IDisk* disk)
          int total_data = 0;
 
          unsigned int index_track = imge_item.start_bit_pos;
+         std::vector<std::pair<unsigned int, unsigned int>> block_spans; // data bits, gap bits
          for (DWORD i = 0; i < imge_item.block_count; i++)
          {
             // Read descriptors
@@ -542,6 +545,7 @@ bool CAPSFile::DecodeData(DataChunks item, IDisk* disk)
             offset += 4;
             unsigned int gap_bits = ExtractInt(&block[offset]);
             offset += 4;
+            block_spans.emplace_back(static_cast<unsigned int>(data_bits), gap_bits);
             int data_bytes = 0;
             int gap_bytes = 0;
             unsigned int gap_offset = 0;
@@ -946,6 +950,31 @@ bool CAPSFile::DecodeData(DataChunks item, IDisk* disk)
             track_number].size)
          {
          }
+
+         // Density protections : rebuild the cell timing of the original disk and measure it like a
+         // flux dump, so HFE / SCP output made from an IPF keeps the protection. Type 5 (Copylock ST) :
+         // block 5 +5%. Types 6 / 7 (Speedlock key) : block 1 +5%, block 2 -5%, as measured on the
+         // real disks (the SPS library plays +10%/-10% or +5% only, an approximation of the same key).
+         IDisk::MFMTrack& mt = disk->side_[imge_item.side].tracks[imge_item.track_number];
+         if ((imge_item.density == 5 || imge_item.density == 6 || imge_item.density == 7) && mt.bitfield && mt.size)
+         {
+            const unsigned int n = mt.size;
+            std::vector<unsigned short> cell_ns(n, 2000);
+            std::vector<unsigned char> bits(n);
+            for (unsigned int c = 0; c < n; c++) bits[c] = mt.bitfield[c] & 1;
+            unsigned int pos = imge_item.start_bit_pos % n;
+            for (size_t b = 0; b < block_spans.size(); b++)
+            {
+               int adj = 0;
+               if (imge_item.density == 5 && b == 5) adj = 100;
+               if ((imge_item.density == 6 || imge_item.density == 7) && b == 1) adj = 100;
+               if ((imge_item.density == 6 || imge_item.density == 7) && b == 2) adj = -100;
+               for (unsigned int c = 0; c < block_spans[b].first; c++)
+                  if (adj) cell_ns[(pos + c) % n] = static_cast<unsigned short>(2000 + adj);
+               pos = (pos + block_spans[b].first + block_spans[b].second) % n;
+            }
+            IDisk::MeasureSectorDensity(mt, bits.data(), n, cell_ns.data());
+         }
       }
    }
 
@@ -966,11 +995,33 @@ int CAPSFile::DecompressData(IDisk* disk, DWORD ctype, DWORD cyl, DWORD head, Da
    offset += 4;
 
    // First pack is density information
-   ExtractDensity(&imageItem.buffer[offset], density_buf_size, ctype, cyl, head);
+   unsigned int* density = ExtractDensity(&imageItem.buffer[offset], density_buf_size, ctype, cyl, head);
+   unsigned int nb_density = ExtractInt(&imageItem.buffer[offset + 4]) >> 2;
    offset += density_buf_size;
 
    // Second one is track informations
    ExtractTrack(disk, &imageItem.buffer[offset], track_buf_size, ctype, cyl, head);
+
+   // The density pack holds one value per MFM byte (8 cells) of the first revolution, 16 = nominal
+   // 2us cells. Turn it into per-cell timing so density protections (Copylock ST) are detected
+   // exactly as for SCP / KryoFlux dumps.
+   if (head < 2 && cyl < disk->side_[head].nb_tracks && disk->side_[head].tracks[cyl].nb_revolutions > 0)
+   {
+      IDisk::MFMTrack& mfm = disk->side_[head].tracks[cyl];
+      unsigned int nb_cells = mfm.revolution[0].size;
+      if (nb_density > 0 && nb_cells > 0)
+      {
+         unsigned short* cell_ns = new unsigned short[nb_cells];
+         for (unsigned int c = 0; c < nb_cells; c++)
+         {
+            unsigned int d = density[(std::min)(c / 8, nb_density - 1)];
+            cell_ns[c] = static_cast<unsigned short>(d * 125); // 16 -> 2000 ns
+         }
+         IDisk::MeasureSectorDensity(mfm, mfm.revolution[0].bitfield, nb_cells, cell_ns);
+         delete[] cell_ns;
+      }
+   }
+   delete[] density;
 
    return 0;
 }
@@ -1182,7 +1233,7 @@ int CAPSFile::CreateIpf(IDisk* disk)
 {
    // Clear values
    memset(&caps_header_, 0, sizeof(caps_header_));
-   memset(&caps_info_, 0, sizeof(caps_header_));
+   memset(&caps_info_, 0, sizeof(caps_info_));
    Clear();
 
    // Now create it !
@@ -1209,10 +1260,13 @@ int CAPSFile::CreateIpf(IDisk* disk)
    caps_info_.origin_crc32 = 0; // TODO ??
    caps_info_.track_min = 0;
    caps_info_.side_min = 0;
-   caps_info_.side_max = 1; // disk->m_NbSide - 1;
+   // Single-sided ST dumps are common : record the real side count
+   const int nb_sides_out = (disk->nb_sides_ >= 2 && disk->side_[1].nb_tracks > 0) ? 2 : 1;
+   const bool atari_st = (disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST);
+   caps_info_.side_max = atari_st ? (nb_sides_out - 1) : 1; // CPC : keep historical behaviour (always 2 sides)
    caps_info_.creation_date = 0; // TODO
    caps_info_.creation_time = 0; // TODO
-   caps_info_.platform_1 = 4;
+   caps_info_.platform_1 = atari_st ? 2 : 4; // IPF platform IDs : 2 = Atari ST, 4 = Amstrad CPC
    caps_info_.disk_number = 0;
    caps_info_.creator_id = 0; // TODO
 
@@ -1226,13 +1280,13 @@ int CAPSFile::CreateIpf(IDisk* disk)
 
    for (int tr = 0; tr < maxtrack; tr++)
    {
-      for (int side = 0; side < 2/*disk->m_NbSide*/; side++)
+      for (int side = 0; side <= static_cast<int>(caps_info_.side_max); side++)
       {
          CreateData(disk, side, tr, datakey++);
       }
    }
 
-   caps_info_.track_max = disk->side_[0].nb_tracks - 1;
+   caps_info_.track_max = maxtrack - 1;
    Swap((unsigned char*)&caps_info_.header.length, caps_info_.header.length - 4);
    crc = CRC::ComputeCrc32(0xEDB88320, (unsigned char*)&caps_info_, sizeof(caps_info_));
    caps_info_.header.crc = SwapInt(crc);
@@ -1667,6 +1721,294 @@ bool CAPSFile::AddStreamRecord(StreamRecording* record, unsigned char* buffer, u
    return byte_size;
 }
 
+
+bool CAPSFile::compact_ = true;
+int CAPSFile::speedlock_density_ = 7;
+
+static void AppendBytes(unsigned char*& rbuf, unsigned int& rsize, unsigned int& roff, const std::vector<unsigned char>& bytes)
+{
+   while (rsize - roff <= bytes.size() + 8)
+   {
+      unsigned char* tmp = rbuf;
+      rbuf = new unsigned char[rsize * 2];
+      memcpy(rbuf, tmp, rsize);
+      rsize = rsize * 2;
+      delete[] tmp;
+   }
+   memcpy(&rbuf[roff], bytes.data(), bytes.size());
+   roff += static_cast<unsigned int>(bytes.size());
+}
+
+// Stream element : header (size width << 5 | type), size big endian, payload
+static void PushElement(std::vector<unsigned char>& out, unsigned char type, unsigned int size,
+                        const unsigned char* payload = nullptr, size_t payload_len = 0)
+{
+   unsigned char width = 1;
+   while (width < 4 && (size >> (8 * width)) != 0) width++;
+   out.push_back(static_cast<unsigned char>((width << 5) | type));
+   for (int b = width - 1; b >= 0; b--) out.push_back(static_cast<unsigned char>(size >> (8 * b)));
+   if (payload) out.insert(out.end(), payload, payload + payload_len);
+}
+
+static bool IsSync4489x3(const unsigned char* cells, unsigned int pos, unsigned int end)
+{
+   static const unsigned short sync = 0x4489;
+   if (pos + 48 > end) return false;
+   for (unsigned int i = 0; i < 48; i++)
+   {
+      const unsigned char cell = cells[pos + i];
+      if (cell > 1 || cell != ((sync >> (15 - (i & 15))) & 1)) return false;
+   }
+   return true;
+}
+
+// Decode one MFM byte at pos. Returns false if a cell is weak or a clock bit is wrong.
+static bool DecodeMfmByte(const unsigned char* cells, unsigned int pos, unsigned char& value, bool& weak)
+{
+   value = 0;
+   weak = false;
+   bool ok = true;
+   unsigned char prev = (pos > 0) ? (cells[pos - 1] & 1) : 0;
+   for (unsigned int i = 0; i < 8; i++)
+   {
+      const unsigned char c = cells[pos + 2 * i], d = cells[pos + 2 * i + 1];
+      if (c > 1 || d > 1) weak = true;
+      const unsigned char data = d & 1, clock = c & 1;
+      if (clock != ((prev == 0 && data == 0) ? 1 : 0)) ok = false;
+      value = static_cast<unsigned char>((value << 1) | data);
+      prev = data;
+   }
+   return ok && !weak;
+}
+
+
+// Stream block : sync run + decoded bytes (weak bytes as fuzzy) while the MFM stays valid.
+// Returns the cell where the stream stops (begin when nothing could be decoded).
+static unsigned int EncodeStreamBlock(std::vector<unsigned char>& ds, const unsigned char* cells, unsigned int begin,
+                                      unsigned int end, unsigned int nb_syncs)
+{
+   std::vector<unsigned char> sync_bytes;
+   for (unsigned int i = 0; i < nb_syncs; i++) { sync_bytes.push_back(0x44); sync_bytes.push_back(0x89); }
+   PushElement(ds, 1, static_cast<unsigned int>(sync_bytes.size()), sync_bytes.data(), sync_bytes.size());
+   unsigned int q = begin + 16 * nb_syncs;
+   std::vector<unsigned char> run;
+   unsigned int fuzzy = 0;
+   unsigned char v;
+   bool weak;
+   while (q + 16 <= end)
+   {
+      const bool ok = DecodeMfmByte(cells, q, v, weak);
+      if (weak)
+      {
+         if (!run.empty()) { PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size()); run.clear(); }
+         fuzzy++;
+      }
+      else if (ok)
+      {
+         if (fuzzy) { PushElement(ds, 5, fuzzy); fuzzy = 0; }
+         run.push_back(v);
+      }
+      else break;
+      q += 16;
+   }
+   if (!run.empty()) PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size());
+   if (fuzzy) PushElement(ds, 5, fuzzy);
+   ds.push_back(0);
+   return q;
+}
+
+bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, const unsigned char* cells,
+                               unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor,
+                               unsigned int min_gap)
+{
+   static const unsigned char sync_bytes[6] = {0x44, 0x89, 0x44, 0x89, 0x44, 0x89};
+   std::vector<unsigned char> ds, gs;
+   unsigned char v;
+   bool weak;
+
+   // ID field : A1 A1 A1 FE C H R N CRC CRC
+   if (!IsSync4489x3(cells, begin, end)) return false;
+   unsigned int p = begin + 48;
+   if (p + 7 * 16 > end) return false;
+   unsigned char id[7];
+   for (int i = 0; i < 7; i++, p += 16)
+   {
+      if (!DecodeMfmByte(cells, p, id[i], weak)) return false;
+   }
+   if (id[0] != 0xFE) return false;
+   PushElement(ds, 1, 6, sync_bytes, 6);
+   PushElement(ds, 2, 7, id, 7);
+
+   // Data field : look for its sync within a normal ID->data gap, byte aligned
+   unsigned int data_end = p;
+   unsigned int dsync = 0;
+   for (unsigned int q = p; q + 48 <= end && q <= p + 60 * 16; q += 16)
+   {
+      if (IsSync4489x3(cells, q, end)) { dsync = q; break; }
+   }
+   if (dsync != 0)
+   {
+      std::vector<unsigned char> mid;
+      for (unsigned int q = p; q < dsync; q += 16)
+      {
+         if (!DecodeMfmByte(cells, q, v, weak)) return false;
+         mid.push_back(v);
+      }
+      unsigned int q = dsync + 48;
+      unsigned char mark;
+      if (q + 16 > end || !DecodeMfmByte(cells, q, mark, weak) || mark < 0xF8 || mark > 0xFB) return false;
+      if ((id[4] & 0xFF) > 3) return false; // unusual sector sizes : keep the exact (legacy) encoding
+      const unsigned int nb = 1 + (128u << id[4]) + 2;
+      if (q + nb * 16 > end) return false;
+
+      if (!mid.empty()) PushElement(ds, 3, static_cast<unsigned int>(mid.size()), mid.data(), mid.size());
+      PushElement(ds, 1, 6, sync_bytes, 6);
+      // Mark + data + CRC, with fuzzy runs for weak bytes
+      std::vector<unsigned char> run;
+      unsigned int fuzzy = 0;
+      for (unsigned int i = 0; i < nb; i++, q += 16)
+      {
+         const bool ok = DecodeMfmByte(cells, q, v, weak);
+         if (weak)
+         {
+            if (!run.empty()) { PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size()); run.clear(); }
+            fuzzy++;
+            continue;
+         }
+         if (!ok) return false; // bad clock bits inside data : not plain MFM, keep it exact
+         if (fuzzy) { PushElement(ds, 5, fuzzy); fuzzy = 0; }
+         run.push_back(v);
+      }
+      if (!run.empty()) PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size());
+      if (fuzzy) PushElement(ds, 5, fuzzy);
+      data_end = q;
+   }
+   ds.push_back(0);
+
+   // Gap up to the next block : fill byte, then 00 bytes just before the next sync
+   const unsigned int gap_cells = end - data_end;
+   if (gap_cells < min_gap) return false; // the reader needs a gap to round the last block
+   unsigned int zeros = 0;
+   while (gap_cells >= 16 * (zeros + 1))
+   {
+      const unsigned int z = end - 16 * (zeros + 1);
+      if (!DecodeMfmByte(cells, z, v, weak) || v != 0x00) break;
+      zeros++;
+   }
+   const unsigned int fwd_cells = gap_cells - 16 * zeros;
+   unsigned char fill = 0x4E;
+   if (fwd_cells >= 16)
+   {
+      // The forward gap must be one repeated byte. A write splice (the end of the track write, or a
+      // sector rewritten later) shifts the pattern by a few cells : allow a couple of such phase slips
+      // and a few odd bytes, which the reader regenerates as plain fill, like SPS images.
+      unsigned int counts[256] = {0}, total = 0, weak_cells = 0;
+      for (unsigned int g = data_end; g < data_end + fwd_cells; g++) if (cells[g] > 1) weak_cells++;
+      for (unsigned int g = data_end; g + 16 <= data_end + fwd_cells; g += 16)
+      {
+         unsigned char b = 0;
+         for (unsigned int i = 0; i < 8; i++) b = static_cast<unsigned char>((b << 1) | (cells[g + 2 * i + 1] & 1));
+         counts[b]++;
+         total++;
+      }
+      unsigned int best = 0;
+      for (int b = 1; b < 256; b++) if (counts[b] > counts[best]) best = b;
+      fill = static_cast<unsigned char>(best);
+
+      // Steady-state MFM cells of the fill byte repeated (its own last data bit precedes it)
+      unsigned char pattern[16];
+      unsigned char prev = fill & 1;
+      for (int i = 0; i < 8; i++)
+      {
+         const unsigned char d = (fill >> (7 - i)) & 1;
+         pattern[2 * i] = (prev == 0 && d == 0) ? 1 : 0;
+         pattern[2 * i + 1] = d;
+         prev = d;
+      }
+      auto matches = [&](unsigned int pos, unsigned int phase)
+      {
+         for (unsigned int i = 0; i < 16; i++)
+            if ((cells[pos + i] & 1) != pattern[(i + phase) & 15]) return false;
+         return true;
+      };
+      const unsigned int gap_end = data_end + fwd_cells;
+      unsigned int phase = 0, slips = 0, junk = 0, pos = data_end;
+      while (pos + 16 <= gap_end)
+      {
+         if (matches(pos, phase)) { pos += 16; continue; }
+         bool relocked = false;
+         for (unsigned int ph = 0; ph < 16 && !relocked; ph++)
+         {
+            if (pos + 32 <= gap_end && matches(pos, ph) && matches(pos + 16, ph)) { phase = ph; slips++; relocked = true; }
+         }
+         if (!relocked) { junk += 16; pos += 16; }
+      }
+      const bool regular = weak_cells <= 16 && slips <= 2 && junk <= 4 * 16;
+      if (!regular && getenv("SUGARCONV_DEBUG_COMPACT"))
+      {
+         printf("\n gap rejected: cells %u zeros %u weak %u fill %02X slips %u junk %u :", gap_cells, zeros, weak_cells, fill, slips, junk);
+         for (unsigned int g = data_end; g + 16 <= gap_end; g += 16)
+         {
+            unsigned char b = 0;
+            for (unsigned int i = 0; i < 8; i++) b = static_cast<unsigned char>((b << 1) | (cells[g + 2 * i + 1] & 1));
+            printf(" %02X", b);
+         }
+      }
+      if (!regular) return false;
+   }
+   PushElement(gs, 2, 8, &fill, 1);
+   gs.push_back(0);
+   block_descriptor.block_flag = 1;
+   if (zeros > 0)
+   {
+      static const unsigned char zero = 0;
+      PushElement(gs, 2, 8, &fill, 1);
+      PushElement(gs, 1, zeros * 8);
+      PushElement(gs, 2, 8, &zero, 1);
+      gs.push_back(0);
+      block_descriptor.block_flag |= 2;
+   }
+
+   AppendBytes(data->buffer, data->size, data->offset, ds);
+   AppendBytes(gap->buffer, gap->size, gap->offset, gs);
+   block_descriptor.block_bits = data_end - begin;
+   block_descriptor.gap_bits = gap_cells;
+   block_descriptor.sps_specific.cell_type = 1;
+   block_descriptor.encoder_type = 1;
+   block_descriptor.gap_value = 0;
+   return true;
+}
+
+
+// Raw block : the cells exactly as they are (data in bits), weak cells as fuzzy runs. Used for the
+// sub-blocks of a Speedlock-style density key, where block boundaries fall inside a sector.
+static void AddRawBlock(unsigned char*& rbuf, unsigned int& rsize, unsigned int& roff, const unsigned char* cells,
+                        unsigned int from, unsigned int to, bool resolve_weak)
+{
+   std::vector<unsigned char> ds;
+   unsigned int p = from;
+   while (p < to)
+   {
+      const bool weak = !resolve_weak && cells[p] > 1;
+      unsigned int e = p;
+      while (e < to && (!resolve_weak && cells[e] > 1) == weak) e++;
+      if (weak)
+      {
+         PushElement(ds, 5, e - p);
+      }
+      else
+      {
+         std::vector<unsigned char> packed((e - p + 7) / 8, 0);
+         for (unsigned int i = p; i < e; i++)
+            if (cells[i] & 1) packed[(i - p) / 8] |= static_cast<unsigned char>(0x80 >> ((i - p) & 7));
+         PushElement(ds, 1, e - p, packed.data(), packed.size());
+      }
+      p = e;
+   }
+   ds.push_back(0);
+   AppendBytes(rbuf, rsize, roff, ds);
+}
+
 int CAPSFile::AddGapRecord(StreamRecording* record, int nb_byte_to_add, unsigned char byte)
 {
    unsigned int size = 0;
@@ -1810,6 +2152,10 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
    unsigned int current_recored_offset = 0;
 
    unsigned char pattern_byte[16];
+   bool starts_with_iam = false;
+   bool stream_track = false;
+   int stream_sync = -1;
+   unsigned int stream_nb_syncs = 0;
 
    if (!abort)
    {
@@ -1817,6 +2163,7 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
       search_offset = FindNextPattern(track_field, disk->side_[side].tracks[tr].size, search_offset, pPatternC2, 6);
       if (search_offset != -1)
       {
+         starts_with_iam = true;
          imge_item.start_bit_pos = (search_offset != -1) ? search_offset : 0;
          imge_item.start_byte_pos = imge_item.start_bit_pos / 8;
       }
@@ -1827,6 +2174,14 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
          {
             imge_item.start_bit_pos = (search_offset != -1) ? search_offset : 0;
             imge_item.start_byte_pos = imge_item.start_bit_pos / 8;
+         }
+         else if (compact_ && (stream_sync = IDisk::FindStreamSync(disk->side_[side].tracks[tr].bitfield,
+                                                              disk->side_[side].tracks[tr].size, stream_nb_syncs)) >= 0)
+         {
+            // No sector headers, but a sync + data stream : custom-format track
+            imge_item.start_bit_pos = static_cast<unsigned int>(stream_sync);
+            imge_item.start_byte_pos = imge_item.start_bit_pos / 8;
+            stream_track = true;
          }
          else
          {
@@ -1840,6 +2195,52 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
       }
    }
 
+   // Speedlock-style density key (Atari ST) : a slow patch followed by a fast patch inside one
+   // sector. IPF density type 6 (Speedlock) makes the reader play block 1 slow and block 2 fast, so
+   // start the track at that sector's ID and cut the sector into 4 blocks at the patch edges.
+   unsigned int sl_cells[3] = {0, 0, 0}; // slow start, slow/fast boundary, fast end (rotated positions)
+   bool speedlock = false;
+   if (!abort && compact_ && disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST)
+   {
+      const IDisk::MFMTrack& mt = disk->side_[side].tracks[tr];
+      for (int r = 0; r + 1 < mt.nb_density_runs && !speedlock; r++)
+      {
+         const IDisk::MFMTrack::DensityRun& slow = mt.density_runs[r];
+         const IDisk::MFMTrack::DensityRun& fast = mt.density_runs[r + 1];
+         if (slow.field != fast.field || slow.permille < 25 || fast.permille > -25) continue;
+         if (fast.byte_start > slow.byte_start + slow.byte_len + 16) continue;
+         std::vector<std::pair<unsigned int, unsigned int>> fields;
+         IDisk::FindDataFields(mt.bitfield, mt.size, fields);
+         if (slow.field >= fields.size()) continue;
+         const unsigned int data0 = fields[slow.field].first + 16; // first data byte, after the mark
+         // ID sync of that sector : the last "A1 A1 A1 FE" header before its data field
+         unsigned int id_sync = (unsigned int)-1;
+         {
+            static const char* idam = "010001001000100101000100100010010100010010001001" "0101010101010100";
+            const unsigned int limit = fields[slow.field].first;
+            const unsigned int lo = (limit > 2000) ? limit - 2000 : 0;
+            for (unsigned int q = limit > 64 ? limit - 64 : 0; q-- > lo;)
+            {
+               bool m = true;
+               for (unsigned int i = 0; i < 64 && m; i++) m = (mt.bitfield[q + i] & 1) == (idam[i] - '0');
+               if (m) { id_sync = q; break; }
+            }
+         }
+         if (id_sync == (unsigned int)-1) continue;
+         const unsigned int slow_start = data0 + slow.byte_start * 16;
+         const unsigned int mid = data0 + ((slow.byte_start + slow.byte_len + fast.byte_start) / 2) * 16;
+         const unsigned int fast_end = data0 + (fast.byte_start + fast.byte_len) * 16;
+         if (!(id_sync < slow_start && slow_start < mid && mid < fast_end && fast_end < mt.size)) continue;
+         imge_item.start_bit_pos = id_sync;
+         imge_item.start_byte_pos = id_sync / 8;
+         starts_with_iam = false;
+         sl_cells[0] = slow_start - id_sync;
+         sl_cells[1] = mid - id_sync;
+         sl_cells[2] = fast_end - id_sync;
+         speedlock = true;
+      }
+   }
+
    if (!abort)
    {
       track_field = new unsigned char[disk->side_[side].tracks[tr].size];
@@ -1848,6 +2249,40 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
       memcpy(&track_field[disk->side_[side].tracks[tr].size - imge_item.start_bit_pos],
              disk->side_[side].tracks[tr].bitfield, imge_item.start_bit_pos);
 
+      // Atari ST : a few unstable cells around the write splice (in the gap after the last data field)
+      // are dump noise, not a protection. Keep them as plain gap so the track matches SPS images.
+      if (disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST)
+      {
+         const unsigned int n = disk->side_[side].tracks[tr].size;
+         std::vector<std::pair<unsigned int, unsigned int>> fields;
+         IDisk::FindDataFields(track_field, n, fields);
+         unsigned int last_data_end = fields.empty() ? n : fields.back().second;
+         for (unsigned int b = last_data_end; b < n; b++)
+         {
+            if (track_field[b] <= 1) continue;
+            unsigned int e = b;
+            while (e < n && track_field[e] > 1) e++;
+            if (e - b <= 64) // up to 4 bytes of splice noise
+            {
+               for (unsigned int c = b; c < e; c++) track_field[c] &= 1;
+            }
+            b = e;
+         }
+      }
+      if (getenv("SUGARCONV_DEBUG_WEAK"))
+      {
+         unsigned int n = disk->side_[side].tracks[tr].size;
+         for (unsigned int b = 0; b < n; b++)
+         {
+            if (track_field[b] > 1)
+            {
+               unsigned int e = b;
+               while (e < n && track_field[e] > 1) e++;
+               printf("\n weak %02u.%d : cells %u-%u (len %u) of %u", tr, side, b, e, e - b, n);
+               b = e;
+            }
+         }
+      }
       search_offset = 0;
       int initial_backward_gap = 0;
       unsigned int offset_gap = disk->side_[side].tracks[tr].size - 16;
@@ -1873,6 +2308,142 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
 
          unsigned int search_next_offset = FindNextSector(track_field, disk->side_[side].tracks[tr].size,
                                                           search_offset + 1, 8);
+         const bool last_block = (search_next_offset == (unsigned int)-1);
+         if (stream_track && search_offset == 0)
+         {
+            const unsigned int track_end = disk->side_[side].tracks[tr].size;
+            std::vector<unsigned char> ds;
+            const unsigned int stream_end = EncodeStreamBlock(ds, track_field, 0, track_end, stream_nb_syncs);
+            // block 0 : sync + decoded stream (whole bytes)
+            BlockDescriptor b0;
+            memset(&b0, 0, sizeof(b0));
+            b0.data_offset = data.offset;
+            b0.sps_specific.gap_offset = gap_data.offset;
+            AppendBytes(data.buffer, data.size, data.offset, ds);
+            b0.block_bits = stream_end;
+            b0.sps_specific.cell_type = 1;
+            b0.encoder_type = 1;
+            // the rest of the track (write splice before the sync) : exact cells, with a small gap at
+            // the very end so the reader can round the track size
+            const unsigned int rest = track_end - stream_end;
+            if (rest >= 32)
+            {
+               b0.gap_bits = 0;
+               list_block_descriptor.push_back(b0);
+               imge_item.data_bits += b0.block_bits;
+               imge_item.block_count++;
+               BlockDescriptor b1;
+               memset(&b1, 0, sizeof(b1));
+               b1.data_offset = data.offset;
+               b1.sps_specific.gap_offset = gap_data.offset;
+               AddRawBlock(data.buffer, data.size, data.offset, track_field, stream_end, track_end - 16, false);
+               b1.block_bits = track_end - 16 - stream_end;
+               b1.block_flag = 4;
+               b1.sps_specific.cell_type = 1;
+               b1.encoder_type = 1;
+               b0 = b1;
+            }
+            // gap : fill with the last decoded value pattern
+            std::vector<unsigned char> gs;
+            unsigned char fill = 0;
+            for (int i = 0; i < 8; i++) fill = static_cast<unsigned char>((fill << 1) | (track_field[track_end - 16 + 2 * i + 1] & 1));
+            PushElement(gs, 2, 8, &fill, 1);
+            gs.push_back(0);
+            AppendBytes(gap_data.buffer, gap_data.size, gap_data.offset, gs);
+            b0.gap_bits = (rest >= 32) ? 16 : rest;
+            b0.block_flag |= 1;
+            list_block_descriptor.push_back(b0);
+            imge_item.data_bits += b0.block_bits;
+            imge_item.gap_bits += b0.gap_bits;
+            imge_item.track_byte += (track_end + 7) / 8;
+            imge_item.block_count++;
+            stream_tracks_++;
+            search_offset = search_next_offset;
+            continue;
+         }
+         if (speedlock && search_offset == 0)
+         {
+            const unsigned int block_end = (search_next_offset != (unsigned int)-1)
+                                              ? search_next_offset : disk->side_[side].tracks[tr].size;
+            if (sl_cells[2] < block_end)
+            {
+               const unsigned int cut[5] = {0, sl_cells[0], sl_cells[1], sl_cells[2], block_end};
+               for (int sb = 0; sb < 4; sb++)
+               {
+                  BlockDescriptor sub;
+                  memset(&sub, 0, sizeof(sub));
+                  sub.data_offset = data.offset;
+                  sub.sps_specific.gap_offset = gap_data.offset;
+                  // The key sector itself is stable on the disk : unstable cells there are splice
+                  // ambiguity in the dump, so they keep the value read (the rest of the track keeps weak bits)
+                  AddRawBlock(data.buffer, data.size, data.offset, track_field, cut[sb], cut[sb + 1], true);
+                  sub.block_bits = cut[sb + 1] - cut[sb];
+                  sub.gap_bits = 0;
+                  sub.block_flag = 4; // sizes in bits
+                  sub.sps_specific.cell_type = 1;
+                  sub.encoder_type = 1;
+                  sub.gap_value = 0x4E;
+                  imge_item.data_bits += sub.block_bits;
+                  imge_item.track_byte += (sub.block_bits + 7) / 8;
+                  list_block_descriptor.push_back(sub);
+                  imge_item.block_count++;
+               }
+               // Speedlock key : type 7 (block 1 +5%) matches the real disks (slow patch +5%, fast patch
+               // -5%) best and is what Dragon's Breath needs ; type 6 (+10% / -10%, -speedlock10) is the
+               // layout SPS used for Colorado
+               imge_item.density = speedlock_density_;
+               speedlock_tracks_++;
+               search_offset = search_next_offset;
+               continue;
+            }
+         }
+         if (compact_)
+         {
+            const unsigned int block_end = (search_next_offset != (unsigned int)-1)
+                                              ? search_next_offset : disk->side_[side].tracks[tr].size;
+            if (AddCompactBlock(&data, &gap_data, track_field, search_offset, block_end, block_descriptor,
+                                last_block ? 8 : 0))
+            {
+               imge_item.data_bits += block_descriptor.block_bits;
+               imge_item.gap_bits += block_descriptor.gap_bits;
+               imge_item.track_byte += (block_descriptor.block_bits + block_descriptor.gap_bits) / 8;
+               list_block_descriptor.push_back(block_descriptor);
+               imge_item.block_count++;
+               compact_blocks_++;
+               search_offset = search_next_offset;
+               continue;
+            }
+            legacy_blocks_++;
+            if (last_block && block_end - search_offset > 64)
+            {
+               // Exact cells, with the last byte as the track gap : the SPS reader rounds the track
+               // to whole bytes by growing the last gap, which must not be empty
+               BlockDescriptor lb;
+               memset(&lb, 0, sizeof(lb));
+               lb.data_offset = data.offset;
+               lb.sps_specific.gap_offset = gap_data.offset;
+               AddRawBlock(data.buffer, data.size, data.offset, track_field, search_offset, block_end - 16, false);
+               unsigned char fill = 0;
+               for (int i = 0; i < 8; i++) fill = static_cast<unsigned char>((fill << 1) | (track_field[block_end - 16 + 2 * i + 1] & 1));
+               std::vector<unsigned char> gs;
+               PushElement(gs, 2, 8, &fill, 1);
+               gs.push_back(0);
+               AppendBytes(gap_data.buffer, gap_data.size, gap_data.offset, gs);
+               lb.block_bits = block_end - 16 - search_offset;
+               lb.gap_bits = 16;
+               lb.block_flag = 4 | 1;
+               lb.sps_specific.cell_type = 1;
+               lb.encoder_type = 1;
+               lb.gap_value = fill;
+               imge_item.data_bits += lb.block_bits;
+               imge_item.gap_bits += lb.gap_bits;
+               imge_item.track_byte += (block_end - search_offset + 7) / 8;
+               list_block_descriptor.push_back(lb);
+               imge_item.block_count++;
+               search_offset = search_next_offset;
+               continue;
+            }
+         }
          int end_of_block = 0;
          if (search_next_offset != -1)
          {
@@ -1976,6 +2547,27 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
    // End of track (or unformatted ones !)
    // TODO
    //End:
+
+   // Copylock ST : the 6th sector of the track is written with ~5% longer cells, all others nominal.
+   // The SPS library reproduces it from density type 5 (it slows down block 5), so flag the track
+   // when the measured flux timing matches that layout.
+   if (!abort && disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST)
+   {
+      const IDisk::MFMTrack& mfm = disk->side_[side].tracks[tr];
+      const int slow = 5 - (starts_with_iam ? 1 : 0); // physical data field that lands in block 5
+      if (mfm.nb_sector_density > slow && slow >= 0 && imge_item.block_count > 5)
+      {
+         bool others_nominal = true;
+         for (int i = 0; i < mfm.nb_sector_density; i++)
+         {
+            if (i != slow && abs(mfm.sector_density[i]) > 20) others_nominal = false;
+         }
+         if (others_nominal && mfm.sector_density[slow] >= 25 && mfm.sector_density[slow] <= 90)
+         {
+            imge_item.density = 5; // Copylock ST
+         }
+      }
+   }
 
    // End : Now compile every descriptor, then every datas ( ).
    // dataoffset and gapoffsets
