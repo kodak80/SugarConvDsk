@@ -488,12 +488,25 @@ bool IDisk::CreateStreamTrackFromRevolutions(int side, int track)
       if (sr < 0) continue;
       sync_pos.push_back(sr);
       const unsigned int nr = t.revolution[r].size;
-      // compare from the sync onwards, wrapping around each revolution
-      const unsigned int len = std::min(n, nr);
-      for (unsigned int i = 0; i < len; i++)
+      // Compare aligned on the sync, both forwards (data after the sync) and backwards (gap before
+      // the sync). Revolutions differ in length by a few cells, so past the write splice a forward
+      // comparison runs out of step (and the other way round before it) : only cells that differ
+      // in both alignments are really unstable. Comparing forwards only marked ~60 bytes after the
+      // splice of Hot Rod's KryoFlux dump weak, and Steem SSE then lost the title / splash screens.
+      const bool forward_only = getenv("SUGARCONV_STREAM_WEAK_FORWARD") != nullptr;
+      for (unsigned int i = 0; i < n; i++)
       {
-         const unsigned int a = (s0 + i) % n, b = (sr + i) % nr;
-         if ((merged[a] & 1) != (t.revolution[r].bitfield[b] & 1)) merged[a] |= BIT_WEAK;
+         const unsigned int a = (s0 + i) % n;
+         const unsigned char c = merged[a] & 1;
+         const bool diff_fwd = (i < nr) && c != (t.revolution[r].bitfield[(sr + i) % nr] & 1);
+         if (!diff_fwd) continue;
+         if (!forward_only)
+         {
+            const unsigned int back = n - i;   // cells before the sync of revolution 0
+            const unsigned int b = (sr + nr - (back % nr)) % nr;
+            if (back < nr && c == (t.revolution[r].bitfield[b] & 1)) continue;
+         }
+         merged[a] |= BIT_WEAK;
       }
    }
    // The index pulse jitters by a few cells from one revolution to the next : the stream sync is
