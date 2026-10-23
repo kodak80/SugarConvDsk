@@ -488,77 +488,13 @@ bool IDisk::CreateStreamTrackFromRevolutions(int side, int track)
       if (sr < 0) continue;
       sync_pos.push_back(sr);
       const unsigned int nr = t.revolution[r].size;
-      // Compare aligned on the sync, forwards (wrapping around). Past the write splice the
-      // revolutions run out of step (they differ in length by a few cells), so the gap from the
-      // splice to the sync comes out weak : Hot Rod needs that area variable in Steem SSE (with
-      // only the splice cells weak, its city title screen is corrupt). SUGARCONV_STREAM_WEAK_BOTHWAYS
-      // also compares backwards from the sync and keeps only cells that differ both ways.
-      const bool forward_only = getenv("SUGARCONV_STREAM_WEAK_BOTHWAYS") == nullptr;
-      for (unsigned int i = 0; i < n; i++)
+      // compare from the sync onwards, wrapping around each revolution
+      const unsigned int len = std::min(n, nr);
+      for (unsigned int i = 0; i < len; i++)
       {
-         const unsigned int a = (s0 + i) % n;
-         const unsigned char c = merged[a] & 1;
-         const bool diff_fwd = (i < nr) && c != (t.revolution[r].bitfield[(sr + i) % nr] & 1);
-         if (!diff_fwd) continue;
-         if (!forward_only)
-         {
-            const unsigned int back = n - i;   // cells before the sync of revolution 0
-            const unsigned int b = (sr + nr - (back % nr)) % nr;
-            if (back < nr && c == (t.revolution[r].bitfield[b] & 1)) continue;
-         }
-         merged[a] |= BIT_WEAK;
+         const unsigned int a = (s0 + i) % n, b = (sr + i) % nr;
+         if ((merged[a] & 1) != (t.revolution[r].bitfield[b] & 1)) merged[a] |= BIT_WEAK;
       }
-   }
-   // The run of 0x00 bytes written just before the sync is stable on the disk (it was written after
-   // the splice). Keep it fixed : weak cells there (Hot Rod's KryoFlux dump, the out-of-step
-   // comparison reached the sync) left Steem SSE with a blank title screen.
-   if (!getenv("SUGARCONV_STREAM_WEAK_PRESYNC"))
-   {
-      // MFM 0x00 = cells 1010... : walk back from the sync while the alternation holds in rev 0
-      unsigned int k = 1;
-      while (k < 64 * 16 && ((t.revolution[0].bitfield[(s0 + n - k) % n] & 1) != (t.revolution[0].bitfield[(s0 + n - k - 1) % n] & 1)))
-         k++;
-      const unsigned int run = (k / 16) * 16;   // whole bytes only
-      for (unsigned int j = 1; j <= run; j++) merged[(s0 + n - j) % n] &= ~BIT_WEAK;
-   }
-   // Track length in whole bytes. The IPF stream block is framed in bytes from the sync, and
-   // capsimg (Hatari, Steem) drops the cells past the last whole byte of a track : with a KryoFlux
-   // revolution of 100149 cells the 5 cells left over were lost and the 0x00 run before the sync
-   // came out one cell out of phase (read as 0xFF). Remove / add the few cells in the middle of the
-   // write splice (unstable anyway) so the track is a multiple of 8 cells.
-   unsigned int nn = n;
-   if (!getenv("SUGARCONV_STREAM_KEEP_LENGTH") && (n % 8) != 0)
-   {
-      const unsigned int r = n % 8;
-      const int delta = (r <= 4) ? -static_cast<int>(r) : static_cast<int>(8 - r);
-      // presync run length (cells) : same walk as above
-      unsigned int k = 1;
-      while (k < 64 * 16 && ((t.revolution[0].bitfield[(s0 + n - k) % n] & 1) != (t.revolution[0].bitfield[(s0 + n - k - 1) % n] & 1)))
-         k++;
-      // linear copy starting at the sync
-      std::vector<unsigned char> lin(n);
-      for (unsigned int i = 0; i < n; i++) lin[i] = merged[(s0 + i) % n];
-      // middle of the last weak run before the 0x00 run, else just before that run
-      unsigned int q = (n > k + 8) ? n - k - 8 : n / 2;
-      const unsigned int lowest = (n - k > 4096) ? n - k - 4096 : 1;
-      for (unsigned int i = n - k; i > lowest; i--)
-      {
-         if (lin[i - 1] & BIT_WEAK)
-         {
-            unsigned int e = i, b = i - 1;
-            while (b > 0 && (lin[b - 1] & BIT_WEAK)) b--;
-            q = (b + e) / 2;
-            break;
-         }
-      }
-      if (delta < 0) lin.erase(lin.begin() + q, lin.begin() + q - delta);
-      else lin.insert(lin.begin() + q, delta, static_cast<unsigned char>(lin[q] | BIT_WEAK));
-      nn = static_cast<unsigned int>(lin.size());
-      delete[] merged;
-      merged = new unsigned char[nn + 32];
-      for (unsigned int i = 0; i < nn; i++) merged[(s0 + i) % nn] = lin[i];
-      if (getenv("SUGARCONV_DEBUG_WEAK"))
-         printf("\n stream track %02d.%d : %u cells -> %u (splice at %u cells after the sync)", track, side, n, nn, q);
    }
    // The index pulse jitters by a few cells from one revolution to the next : the stream sync is
    // found 942..946 cells after the index on Hot Rod, and the cells at the write splice that sit
@@ -572,9 +508,9 @@ bool IDisk::CreateStreamTrackFromRevolutions(int side, int track)
       const int shift = s0 - s_med;   // cells : new[i] = merged[i + shift]
       if (shift != 0 && std::abs(shift) < 64)
       {
-         unsigned char* rotated = new unsigned char[nn + 32];
-         for (unsigned int i = 0; i < nn; i++)
-            rotated[i] = merged[(i + nn + shift) % nn];
+         unsigned char* rotated = new unsigned char[n + 32];
+         for (unsigned int i = 0; i < n; i++)
+            rotated[i] = merged[(i + n + shift) % n];
          delete[] merged;
          merged = rotated;
          if (getenv("SUGARCONV_DEBUG_WEAK"))
@@ -583,7 +519,7 @@ bool IDisk::CreateStreamTrackFromRevolutions(int side, int track)
       }
    }
    t.bitfield = merged;
-   t.size = nn;
+   t.size = n;
    return true;
 }
 
