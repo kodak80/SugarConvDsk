@@ -1,5 +1,8 @@
 #include <winver.h>
 
+// Application icon (Explorer, taskbar, title bar) : a 3.5" floppy disk, 16 to 256 pixels
+IDI_APP ICON "app.ico"
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,0,0,0
  PRODUCTVERSION 1,0,0,0

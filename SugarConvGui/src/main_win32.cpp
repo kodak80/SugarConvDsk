@@ -290,6 +290,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
 
    WNDCLASSEXW wc = {sizeof(wc), CS_CLASSDC, WndProc, 0, 0, instance, LoadIconW(instance, L"IDI_APP"), LoadCursor(nullptr, IDC_ARROW),
                      nullptr, nullptr, L"SugarConvGui", nullptr};
+   // small icon (title bar, taskbar) from the same resource at the system's small size
+   wc.hIconSm = static_cast<HICON>(LoadImageW(instance, L"IDI_APP", IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                              GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR));
    RegisterClassExW(&wc);
    const POINT origin = {0, 0};
    const float scale = ImGui_ImplWin32_GetDpiScaleForMonitor(MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY));

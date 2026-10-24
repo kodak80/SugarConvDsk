@@ -227,7 +227,14 @@ void App::DrawMenuBar()
       }
       ImGui::Separator();
       if (ImGui::MenuItem("Remove finished")) converter_.ClearFinished();
-      if (ImGui::MenuItem("Remove all", nullptr, false, !converter_.Busy())) { converter_.ClearAll(); selected_job_ = 0; }
+      if (ImGui::MenuItem("Clear all", nullptr, false, !converter_.Busy()))
+      {
+         converter_.ClearAll();
+         selected_job_ = 0;
+         multi_select_.clear();
+         sel_side_ = sel_track_ = -1;
+         live_log_.clear();
+      }
       ImGui::Separator();
       if (ImGui::MenuItem("Exit") && hooks_.quit) hooks_.quit();
       ImGui::EndMenu();
@@ -283,6 +290,21 @@ void App::DrawToolbar()
    ImGui::BeginDisabled(!busy);
    if (ImGui::Button("Stop after current")) converter_.StopAfterCurrent();
    ImGui::EndDisabled();
+   ImGui::SameLine();
+   ImGui::TextDisabled("|");
+   ImGui::SameLine();
+   ImGui::BeginDisabled(busy || converter_.Snapshot().empty());
+   if (ImGui::Button("Clear all"))
+   {
+      converter_.ClearAll();
+      selected_job_ = 0;
+      multi_select_.clear();
+      sel_side_ = sel_track_ = -1;
+      live_log_.clear();
+      status_ = "List cleared";
+   }
+   ImGui::EndDisabled();
+   ImGui::SetItemTooltip("Remove every disk from the list (files on disk are not touched)");
    if (!status_.empty())
    {
       ImGui::SameLine();
