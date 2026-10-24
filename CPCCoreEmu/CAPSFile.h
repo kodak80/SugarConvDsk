@@ -182,9 +182,11 @@ protected:
    int ExtractTrack(IDisk* disk, unsigned char* buffer, int density_buf_size, DWORD ctype, DWORD cyl, DWORD head);
    int AddGapRecord(StreamRecording* record, int nb_byte_to_add, unsigned char byte);
    // SPS-style compact block : sync / decoded ID / gap / sync / decoded data (+ fuzzy runs), gap as fill
-   // byte + trailing 00 bytes. Returns false (nothing written) when the block can't be represented exactly.
+   // byte + trailing 00 bytes. A data field written at another bit phase than its ID (the sector was
+   // rewritten : write splice between ID and data) becomes a second block, the ID block's gap taking the
+   // odd cell count. Returns false (nothing written) when the sector can't be represented exactly.
    bool AddCompactBlock(StreamRecording* data, StreamRecording* gap, const unsigned char* cells,
-                        unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor,
+                        unsigned int begin, unsigned int end, std::vector<BlockDescriptor>& blocks,
                         unsigned int min_gap = 0);
 public:
    static bool compact_;          // use the compact encoder (default) ; -ipfraw disables it

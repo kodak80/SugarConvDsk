@@ -1817,76 +1817,15 @@ static unsigned int EncodeStreamBlock(std::vector<unsigned char>& ds, const unsi
    return q;
 }
 
-bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, const unsigned char* cells,
-                               unsigned int begin, unsigned int end, BlockDescriptor& block_descriptor,
-                               unsigned int min_gap)
+// Gap of a compact block : fill byte, then the 00 bytes just before the next sync. Fills gs and the
+// block flags ; false when the gap isn't regular enough to be regenerated.
+static bool EncodeCompactGap(const unsigned char* cells, unsigned int from, unsigned int end, unsigned int min_gap,
+                             std::vector<unsigned char>& gs, unsigned int& block_flag, bool* exact = nullptr)
 {
-   static const unsigned char sync_bytes[6] = {0x44, 0x89, 0x44, 0x89, 0x44, 0x89};
-   std::vector<unsigned char> ds, gs;
+   if (exact) *exact = false;
    unsigned char v;
    bool weak;
-
-   // ID field : A1 A1 A1 FE C H R N CRC CRC
-   if (!IsSync4489x3(cells, begin, end)) return false;
-   unsigned int p = begin + 48;
-   if (p + 7 * 16 > end) return false;
-   unsigned char id[7];
-   for (int i = 0; i < 7; i++, p += 16)
-   {
-      if (!DecodeMfmByte(cells, p, id[i], weak)) return false;
-   }
-   if (id[0] != 0xFE) return false;
-   PushElement(ds, 1, 6, sync_bytes, 6);
-   PushElement(ds, 2, 7, id, 7);
-
-   // Data field : look for its sync within a normal ID->data gap, byte aligned
-   unsigned int data_end = p;
-   unsigned int dsync = 0;
-   for (unsigned int q = p; q + 48 <= end && q <= p + 60 * 16; q += 16)
-   {
-      if (IsSync4489x3(cells, q, end)) { dsync = q; break; }
-   }
-   if (dsync != 0)
-   {
-      std::vector<unsigned char> mid;
-      for (unsigned int q = p; q < dsync; q += 16)
-      {
-         if (!DecodeMfmByte(cells, q, v, weak)) return false;
-         mid.push_back(v);
-      }
-      unsigned int q = dsync + 48;
-      unsigned char mark;
-      if (q + 16 > end || !DecodeMfmByte(cells, q, mark, weak) || mark < 0xF8 || mark > 0xFB) return false;
-      if ((id[4] & 0xFF) > 3) return false; // unusual sector sizes : keep the exact (legacy) encoding
-      const unsigned int nb = 1 + (128u << id[4]) + 2;
-      if (q + nb * 16 > end) return false;
-
-      if (!mid.empty()) PushElement(ds, 3, static_cast<unsigned int>(mid.size()), mid.data(), mid.size());
-      PushElement(ds, 1, 6, sync_bytes, 6);
-      // Mark + data + CRC, with fuzzy runs for weak bytes
-      std::vector<unsigned char> run;
-      unsigned int fuzzy = 0;
-      for (unsigned int i = 0; i < nb; i++, q += 16)
-      {
-         const bool ok = DecodeMfmByte(cells, q, v, weak);
-         if (weak)
-         {
-            if (!run.empty()) { PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size()); run.clear(); }
-            fuzzy++;
-            continue;
-         }
-         if (!ok) return false; // bad clock bits inside data : not plain MFM, keep it exact
-         if (fuzzy) { PushElement(ds, 5, fuzzy); fuzzy = 0; }
-         run.push_back(v);
-      }
-      if (!run.empty()) PushElement(ds, 2, static_cast<unsigned int>(run.size()), run.data(), run.size());
-      if (fuzzy) PushElement(ds, 5, fuzzy);
-      data_end = q;
-   }
-   ds.push_back(0);
-
-   // Gap up to the next block : fill byte, then 00 bytes just before the next sync
-   const unsigned int gap_cells = end - data_end;
+   const unsigned int gap_cells = end - from;
    if (gap_cells < min_gap) return false; // the reader needs a gap to round the last block
    unsigned int zeros = 0;
    while (gap_cells >= 16 * (zeros + 1))
@@ -1902,14 +1841,13 @@ bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, cons
       // The forward gap must be one repeated byte. A write splice (the end of the track write, or a
       // sector rewritten later) shifts the pattern by a few cells : allow a couple of such phase slips
       // and a few odd bytes, which the reader regenerates as plain fill, like SPS images.
-      unsigned int counts[256] = {0}, total = 0, weak_cells = 0;
-      for (unsigned int g = data_end; g < data_end + fwd_cells; g++) if (cells[g] > 1) weak_cells++;
-      for (unsigned int g = data_end; g + 16 <= data_end + fwd_cells; g += 16)
+      unsigned int counts[256] = {0}, weak_cells = 0;
+      for (unsigned int g = from; g < from + fwd_cells; g++) if (cells[g] > 1) weak_cells++;
+      for (unsigned int g = from; g + 16 <= from + fwd_cells; g += 16)
       {
          unsigned char b = 0;
          for (unsigned int i = 0; i < 8; i++) b = static_cast<unsigned char>((b << 1) | (cells[g + 2 * i + 1] & 1));
          counts[b]++;
-         total++;
       }
       unsigned int best = 0;
       for (int b = 1; b < 256; b++) if (counts[b] > counts[best]) best = b;
@@ -1931,8 +1869,8 @@ bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, cons
             if ((cells[pos + i] & 1) != pattern[(i + phase) & 15]) return false;
          return true;
       };
-      const unsigned int gap_end = data_end + fwd_cells;
-      unsigned int phase = 0, slips = 0, junk = 0, pos = data_end;
+      const unsigned int gap_end = from + fwd_cells;
+      unsigned int phase = 0, slips = 0, junk = 0, pos = from;
       while (pos + 16 <= gap_end)
       {
          if (matches(pos, phase)) { pos += 16; continue; }
@@ -1947,7 +1885,7 @@ bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, cons
       if (!regular && getenv("SUGARCONV_DEBUG_COMPACT"))
       {
          printf("\n gap rejected: cells %u zeros %u weak %u fill %02X slips %u junk %u :", gap_cells, zeros, weak_cells, fill, slips, junk);
-         for (unsigned int g = data_end; g + 16 <= gap_end; g += 16)
+         for (unsigned int g = from; g + 16 <= gap_end; g += 16)
          {
             unsigned char b = 0;
             for (unsigned int i = 0; i < 8; i++) b = static_cast<unsigned char>((b << 1) | (cells[g + 2 * i + 1] & 1));
@@ -1955,10 +1893,15 @@ bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, cons
          }
       }
       if (!regular) return false;
+      if (exact) *exact = slips == 0 && junk == 0 && weak_cells == 0 && (fwd_cells & 15) == 0;
+   }
+   else if (exact)
+   {
+      *exact = fwd_cells == 0;
    }
    PushElement(gs, 2, 8, &fill, 1);
    gs.push_back(0);
-   block_descriptor.block_flag = 1;
+   block_flag = 1;
    if (zeros > 0)
    {
       static const unsigned char zero = 0;
@@ -1966,16 +1909,202 @@ bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, cons
       PushElement(gs, 1, zeros * 8);
       PushElement(gs, 2, 8, &zero, 1);
       gs.push_back(0);
-      block_descriptor.block_flag |= 2;
+      block_flag |= 2;
+   }
+   return true;
+}
+
+bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, const unsigned char* cells,
+                               unsigned int begin, unsigned int end, std::vector<BlockDescriptor>& blocks,
+                               unsigned int min_gap)
+{
+   static const unsigned char sync_bytes[6] = {0x44, 0x89, 0x44, 0x89, 0x44, 0x89};
+   std::vector<unsigned char> ds, gs;
+   unsigned char v;
+   bool weak;
+
+   // ID field : A1 A1 A1 FE C H R N CRC CRC
+   if (!IsSync4489x3(cells, begin, end)) return false;
+   unsigned int p = begin + 48;
+   if (p + 7 * 16 > end) return false;
+   unsigned char id[7];
+   for (int i = 0; i < 7; i++, p += 16)
+   {
+      if (!DecodeMfmByte(cells, p, id[i], weak)) return false;
+   }
+   if (id[0] != 0xFE) return false;
+   PushElement(ds, 1, 6, sync_bytes, 6);
+   PushElement(ds, 2, 7, id, 7);
+
+   // Data field : look for its sync within a normal ID->data gap, at any cell (a rewritten sector's
+   // data field is at its own bit phase)
+   unsigned int dsync = 0;
+   for (unsigned int q = p; q + 48 <= end && q <= p + 60 * 16; q++)
+   {
+      if (IsSync4489x3(cells, q, end)) { dsync = q; break; }
    }
 
-   AppendBytes(data->buffer, data->size, data->offset, ds);
-   AppendBytes(gap->buffer, gap->size, gap->offset, gs);
-   block_descriptor.block_bits = data_end - begin;
-   block_descriptor.gap_bits = gap_cells;
-   block_descriptor.sps_specific.cell_type = 1;
-   block_descriptor.encoder_type = 1;
-   block_descriptor.gap_value = 0;
+   // Mark + data + CRC from a data sync, with fuzzy runs for weak bytes. Returns the end cell, 0 if
+   // the field isn't plain MFM.
+   auto encode_data = [&](unsigned int sync_pos, std::vector<unsigned char>& out) -> unsigned int
+   {
+      unsigned int q = sync_pos + 48;
+      unsigned char mark;
+      if (q + 16 > end || !DecodeMfmByte(cells, q, mark, weak) || mark < 0xF8 || mark > 0xFB) return 0;
+      if ((id[4] & 0xFF) > 3) return 0; // unusual sector sizes : keep the exact (legacy) encoding
+      const unsigned int nb = 1 + (128u << id[4]) + 2;
+      if (q + nb * 16 > end) return 0;
+      PushElement(out, 1, 6, sync_bytes, 6);
+      std::vector<unsigned char> run;
+      unsigned int fuzzy = 0;
+      for (unsigned int i = 0; i < nb; i++, q += 16)
+      {
+         const bool ok = DecodeMfmByte(cells, q, v, weak);
+         if (weak)
+         {
+            if (!run.empty()) { PushElement(out, 2, static_cast<unsigned int>(run.size()), run.data(), run.size()); run.clear(); }
+            fuzzy++;
+            continue;
+         }
+         if (!ok) return 0; // bad clock bits inside data : not plain MFM, keep it exact
+         if (fuzzy) { PushElement(out, 5, fuzzy); fuzzy = 0; }
+         run.push_back(v);
+      }
+      if (!run.empty()) PushElement(out, 2, static_cast<unsigned int>(run.size()), run.data(), run.size());
+      if (fuzzy) PushElement(out, 5, fuzzy);
+      return q;
+   };
+
+   auto make_block = [&](unsigned int from, unsigned int data_end, unsigned int gap_end, unsigned int flag,
+                         const std::vector<unsigned char>& bds, const std::vector<unsigned char>& bgs)
+   {
+      BlockDescriptor bd;
+      memset(&bd, 0, sizeof(bd));
+      bd.data_offset = data->offset;
+      bd.sps_specific.gap_offset = gap->offset;
+      AppendBytes(data->buffer, data->size, data->offset, bds);
+      AppendBytes(gap->buffer, gap->size, gap->offset, bgs);
+      bd.block_flag = flag;
+      bd.block_bits = data_end - from;
+      bd.gap_bits = gap_end - data_end;
+      bd.sps_specific.cell_type = 1;
+      bd.encoder_type = 1;
+      bd.gap_value = 0;
+      blocks.push_back(bd);
+   };
+
+   if (dsync != 0 && ((dsync - p) & 15) != 0 && !getenv("SUGARCONV_NO_SPLICE_BLOCKS"))
+   {
+      // Write splice between ID and data. Block 1 (sizes in bits) = the ID, the gap bytes after it in
+      // the ID's bit phase, then the cells up to the data sync exactly (the splice and the 00 bytes
+      // in the data field's phase) ; block 2 = the data field and the gap to the next sector.
+      std::vector<unsigned char> ds1, ds2, gs1, gs2, ds3;
+      unsigned int flag2 = 0;
+      const unsigned int data_end = encode_data(dsync, ds2);
+      if (data_end == 0) return false;
+      ds2.push_back(0);
+      bool gap_exact = false;
+      const bool gap_ok = EncodeCompactGap(cells, data_end, end, min_gap, gs2, flag2, &gap_exact);
+      // the gap after the data field : generated when it is a clean fill, else kept exactly in a
+      // third block (decoded bytes in the data field's phase, then the cells up to the next sector)
+      const bool exact_gap_block = !(gap_ok && gap_exact);
+      // the last block of a track keeps its final byte as the gap (the reader rounds the track there)
+      const unsigned int end3 = (min_gap > 0) ? end - 16 : end;
+      unsigned char last_fill = 0;
+      if (exact_gap_block)
+      {
+         if (min_gap > 0 && end < data_end + 48) return false;
+         for (int i = 0; i < 8 && min_gap > 0; i++)
+            last_fill = static_cast<unsigned char>((last_fill << 1) | (cells[end - 16 + 2 * i + 1] & 1));
+         gs2.clear();
+         flag2 = 0;
+         std::vector<unsigned char> run;
+         unsigned int q = data_end;
+         while (q + 16 <= end3 && DecodeMfmByte(cells, q, v, weak))
+         {
+            run.push_back(v);
+            q += 16;
+         }
+         if (!run.empty()) PushElement(ds3, 3, static_cast<unsigned int>(run.size()) * 8, run.data(), run.size());
+         if (q < end3)
+         {
+            std::vector<unsigned char> packed((end3 - q + 7) / 8, 0);
+            for (unsigned int i = q; i < end3; i++)
+            {
+               if (cells[i] > 1) return false;
+               if (cells[i] & 1) packed[(i - q) / 8] |= static_cast<unsigned char>(0x80 >> ((i - q) & 7));
+            }
+            PushElement(ds3, 1, end3 - q, packed.data(), packed.size());
+         }
+         ds3.push_back(0);
+      }
+
+      PushElement(ds1, 1, 48, sync_bytes, 6);
+      PushElement(ds1, 2, 7 * 8, id, 7);
+      std::vector<unsigned char> mid;
+      unsigned int q = p;
+      while (q + 16 <= dsync && DecodeMfmByte(cells, q, v, weak))
+      {
+         mid.push_back(v);
+         q += 16;
+      }
+      if (!mid.empty()) PushElement(ds1, 3, static_cast<unsigned int>(mid.size()) * 8, mid.data(), mid.size());
+      if (q < dsync)
+      {
+         std::vector<unsigned char> packed((dsync - q + 7) / 8, 0);
+         for (unsigned int i = q; i < dsync; i++)
+         {
+            if (cells[i] > 1) return false; // weak cells : keep the exact (legacy) encoding
+            if (cells[i] & 1) packed[(i - q) / 8] |= static_cast<unsigned char>(0x80 >> ((i - q) & 7));
+         }
+         PushElement(ds1, 1, dsync - q, packed.data(), packed.size());
+      }
+      ds1.push_back(0);
+      make_block(begin, dsync, dsync, 4, ds1, gs1);
+      if (exact_gap_block)
+      {
+         const std::vector<unsigned char> none;
+         make_block(dsync, data_end, data_end, 0, ds2, none);
+         if (min_gap > 0)
+         {
+            std::vector<unsigned char> gs3;
+            PushElement(gs3, 2, 8, &last_fill, 1);
+            gs3.push_back(0);
+            make_block(data_end, end3, end, 4 | 1, ds3, gs3);
+            blocks.back().gap_value = last_fill;
+         }
+         else if (data_end < end)
+         {
+            make_block(data_end, end, end, 4, ds3, none);
+         }
+      }
+      else
+      {
+         make_block(dsync, data_end, end, flag2, ds2, gs2);
+      }
+      return true;
+   }
+
+   unsigned int data_end = p;
+   if (dsync != 0 && ((dsync - p) & 15) == 0)
+   {
+      std::vector<unsigned char> mid;
+      for (unsigned int q = p; q < dsync; q += 16)
+      {
+         if (!DecodeMfmByte(cells, q, v, weak)) return false;
+         mid.push_back(v);
+      }
+      std::vector<unsigned char> dfield;
+      data_end = encode_data(dsync, dfield);
+      if (data_end == 0) return false;
+      if (!mid.empty()) PushElement(ds, 3, static_cast<unsigned int>(mid.size()), mid.data(), mid.size());
+      ds.insert(ds.end(), dfield.begin(), dfield.end());
+   }
+   ds.push_back(0);
+
+   unsigned int flag = 0;
+   if (!EncodeCompactGap(cells, data_end, end, min_gap, gs, flag)) return false;
+   make_block(begin, data_end, end, flag, ds, gs);
    return true;
 }
 
@@ -2401,14 +2530,18 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
          {
             const unsigned int block_end = (search_next_offset != (unsigned int)-1)
                                               ? search_next_offset : disk->side_[side].tracks[tr].size;
-            if (AddCompactBlock(&data, &gap_data, track_field, search_offset, block_end, block_descriptor,
+            std::vector<BlockDescriptor> compact;
+            if (AddCompactBlock(&data, &gap_data, track_field, search_offset, block_end, compact,
                                 last_block ? 8 : 0))
             {
-               imge_item.data_bits += block_descriptor.block_bits;
-               imge_item.gap_bits += block_descriptor.gap_bits;
-               imge_item.track_byte += (block_descriptor.block_bits + block_descriptor.gap_bits) / 8;
-               list_block_descriptor.push_back(block_descriptor);
-               imge_item.block_count++;
+               for (auto& bd : compact)
+               {
+                  imge_item.data_bits += bd.block_bits;
+                  imge_item.gap_bits += bd.gap_bits;
+                  imge_item.track_byte += (bd.block_bits + bd.gap_bits) / 8;
+                  list_block_descriptor.push_back(bd);
+                  imge_item.block_count++;
+               }
                compact_blocks_++;
                search_offset = search_next_offset;
                continue;
