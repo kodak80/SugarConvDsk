@@ -597,6 +597,31 @@ bool CAPSFile::DecodeData(DataChunks item, IDisk* disk)
                backward_gap = GetStreamGapItem(&backward_stream, current_block_gap, gap_offset, item.size);
             }
 
+            // Weak data in bit-sized blocks counts data bits (2 cells each). SugarConvDsk before
+            // 48daf8a wrote it in cells : recognise such a block (its elements only add up to the block
+            // size when weak sizes are taken as cells) and read it that way.
+            int weak_cells_per_unit = 2;
+            if ((block_flags & 0x4) == 0x4)
+            {
+               unsigned long long as_bits = 0, as_cells = 0;
+               unsigned int o = 0;
+               bool any_weak = false;
+               for (int guard = 0; guard < 100000; guard++)
+               {
+                  const unsigned char h = current_block_data[o++];
+                  if (h == 0) break;
+                  const int w = h >> 5, ty = h & 0x1F;
+                  unsigned int sz = 0;
+                  for (int j = 0; j < w; j++) sz = (sz << 8) | current_block_data[o++];
+                  if (ty == 5) { as_bits += 2ull * sz; as_cells += sz; any_weak = true; }
+                  else if (ty == 1) { as_bits += sz; as_cells += sz; o += (sz + 7) / 8; }
+                  else { as_bits += 2ull * sz; as_cells += 2ull * sz; o += (sz + 7) / 8; }
+               }
+               if (any_weak && as_bits != static_cast<unsigned long long>(data_bits) &&
+                   as_cells == static_cast<unsigned long long>(data_bits))
+                  weak_cells_per_unit = 1;
+            }
+
             // data
             unsigned char b = current_block_data[data_offset++];
             unsigned int offset_before = index_track;
@@ -617,7 +642,7 @@ bool CAPSFile::DecodeData(DataChunks item, IDisk* disk)
                      if (data_type == 5)
                      {
                         // weak data : the size counts data bits, 2 MFM cells each (as capsimg reads it)
-                        for (int c = 0; c < data_size * 2; c++)
+                        for (int c = 0; c < data_size * weak_cells_per_unit; c++)
                         {
                            disk->side_[imge_item.side].tracks[imge_item.track_number].bitfield[index_track++] =
                               BIT_WEAK;
