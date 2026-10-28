@@ -616,7 +616,8 @@ bool CAPSFile::DecodeData(DataChunks item, IDisk* disk)
                   {
                      if (data_type == 5)
                      {
-                        for (int c = 0; c < data_size; c++)
+                        // weak data : the size counts data bits, 2 MFM cells each (as capsimg reads it)
+                        for (int c = 0; c < data_size * 2; c++)
                         {
                            disk->side_[imge_item.side].tracks[imge_item.track_number].bitfield[index_track++] =
                               BIT_WEAK;
@@ -2114,25 +2115,44 @@ bool CAPSFile::AddCompactBlock(StreamRecording* data, StreamRecording* gap, cons
 static void AddRawBlock(unsigned char*& rbuf, unsigned int& rsize, unsigned int& roff, const unsigned char* cells,
                         unsigned int from, unsigned int to, bool resolve_weak)
 {
-   std::vector<unsigned char> ds;
-   unsigned int p = from;
-   while (p < to)
+   // segments of raw cells and weak cells
+   struct Seg { bool weak; unsigned int b, e; };
+   std::vector<Seg> segs;
+   for (unsigned int p = from; p < to;)
    {
-      const bool weak = !resolve_weak && cells[p] > 1;
+      // weak / optional cells (BIT_INDEX marks are not weak)
+      auto is_weak = [&](unsigned int c) { return !resolve_weak && (cells[c] & (BIT_WEAK | BIT_OPTIONAL)) != 0; };
+      const bool weak = is_weak(p);
       unsigned int e = p;
-      while (e < to && (!resolve_weak && cells[e] > 1) == weak) e++;
-      if (weak)
+      while (e < to && is_weak(e) == weak) e++;
+      segs.push_back({weak, p, e});
+      p = e;
+   }
+   // A weak element's size is in data bits (MFM : 2 cells each, as SPS readers decode it), so a weak
+   // run must cover an even number of cells : the last cell of an odd run keeps the value read. The
+   // block keeps its exact length.
+   for (size_t i = 0; i < segs.size(); i++)
+   {
+      if (!segs[i].weak || ((segs[i].e - segs[i].b) & 1) == 0) continue;
+      segs[i].e--;
+      if (i + 1 < segs.size() && !segs[i + 1].weak) segs[i + 1].b--;
+      else segs.insert(segs.begin() + i + 1, Seg{false, segs[i].e, segs[i].e + 1});
+   }
+   std::vector<unsigned char> ds;
+   for (const auto& sg : segs)
+   {
+      if (sg.e <= sg.b) continue;
+      if (sg.weak)
       {
-         PushElement(ds, 5, e - p);
+         PushElement(ds, 5, (sg.e - sg.b) / 2);
       }
       else
       {
-         std::vector<unsigned char> packed((e - p + 7) / 8, 0);
-         for (unsigned int i = p; i < e; i++)
-            if (cells[i] & 1) packed[(i - p) / 8] |= static_cast<unsigned char>(0x80 >> ((i - p) & 7));
-         PushElement(ds, 1, e - p, packed.data(), packed.size());
+         std::vector<unsigned char> packed((sg.e - sg.b + 7) / 8, 0);
+         for (unsigned int i = sg.b; i < sg.e; i++)
+            if (cells[i] & 1) packed[(i - sg.b) / 8] |= static_cast<unsigned char>(0x80 >> ((i - sg.b) & 7));
+         PushElement(ds, 1, sg.e - sg.b, packed.data(), packed.size());
       }
-      p = e;
    }
    ds.push_back(0);
    AppendBytes(rbuf, rsize, roff, ds);
@@ -2652,8 +2672,24 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
             // TODO : Adjust at bit value
             // data itself : Add the data (supposed to pPatternC2 + 16 bits (FC most of the time)
             // From searchOffset -> offsetGap;
-            bool byte_size = AddStreamRecord(&data, track_field, search_offset, offset_gap,
-                                             disk->side_[side].tracks[tr].size);
+            // A block with weak cells is stored as exact cells with weak runs of whole data bits (the
+            // stream encoder below sizes weak runs in cells, which SPS readers read as twice as long)
+            bool has_weak = false;
+            for (unsigned int c = search_offset; c < static_cast<unsigned int>(offset_gap) && !has_weak; c++)
+               has_weak = (track_field[c] & (BIT_WEAK | BIT_OPTIONAL)) != 0;
+            bool byte_size = false;
+            if (getenv("SUGARCONV_DEBUG_COMPACT"))
+            {
+               unsigned int hist[16] = {0};
+               for (unsigned int c = search_offset; c < static_cast<unsigned int>(offset_gap); c++) hist[track_field[c] & 15]++;
+               printf("\n legacy block %02d.%d cells %u-%d weak %d values:", tr, side, search_offset, offset_gap, has_weak);
+               for (int k = 0; k < 16; k++) if (hist[k]) printf(" %d:%u", k, hist[k]);
+            }
+            if (has_weak)
+               AddRawBlock(data.buffer, data.size, data.offset, track_field, search_offset, offset_gap, false);
+            else
+               byte_size = AddStreamRecord(&data, track_field, search_offset, offset_gap,
+                                           disk->side_[side].tracks[tr].size);
             imge_item.data_bits += (offset_gap - search_offset);
             imge_item.track_byte += (offset_gap - search_offset + 7) / 8;
 
@@ -2740,6 +2776,11 @@ int CAPSFile::CreateData(IDisk* disk, int side, unsigned int tr, int datakey)
 
    // Now, update IMGE
    imge_item.track_bits = imge_item.gap_bits + imge_item.data_bits;
+   // Track size in bytes as SPS images count it : each block (data + gap) rounded up to whole bytes.
+   // Readers that check the IMGE (Aufit : "inconsistent track content") reject other values.
+   imge_item.track_byte = 0;
+   for (const auto& bd : list_block_descriptor)
+      imge_item.track_byte += (bd.block_bits + bd.gap_bits + 7) / 8;
 
    if (side < disk->nb_sides_ && tr < disk->side_[side].nb_tracks)
    {
