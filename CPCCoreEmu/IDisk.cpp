@@ -1024,7 +1024,7 @@ int AddByteToTrackInBits(unsigned char* track, unsigned int index, unsigned char
       }
       else
       {
-         track[index++] = (previous_bit == 0) ? 1 : 0;
+         track[index++] = ((previous_bit & 1) == 0) ? 1 : 0  /* a weak cell before : its read value */;
          if (i + 1 < size)
             track[index] = 0;
       }
@@ -1088,7 +1088,7 @@ int IDisk::AddByteToTrack(unsigned char* track, unsigned int index, unsigned cha
       }
       else
       {
-         track[index++] = (previous_bit == 0) ? 1 : 0;
+         track[index++] = ((previous_bit & 1) == 0) ? 1 : 0  /* a weak cell before : its read value */;
          track[index] = 0;
       }
 
@@ -3142,6 +3142,12 @@ int IDisk::CompareTracks(IDisk::MFMTrack* track1, IDisk::MFMTrack* track2)
                // yes ? Set the indexes on the next non-weak pattern
                index1 += count1 + opt1;
                index2 += count2 + opt2;
+               // IPF weak data counts data bits (2 cells each) : an odd weak run comes back one cell
+               // shorter, that cell keeping the value read. Step over it on the shorter side.
+               if (count2 + opt2 + 1 == count1 + opt1 && index2 < track2->size && (track2->bitfield[index2] & (BIT_WEAK | BIT_OPTIONAL)) == 0)
+                  index2++;
+               else if (count1 + opt1 + 1 == count2 + opt2 && index1 < track1->size && (track1->bitfield[index1] & (BIT_WEAK | BIT_OPTIONAL)) == 0)
+                  index1++;
             }
             else
             {

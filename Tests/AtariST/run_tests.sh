@@ -18,6 +18,7 @@ check() { # name spt sides expect-pattern...
    out=$(python3 "$HERE/ipfcheck.py" "$LIB" "${name}_out.IPF" "$name.st" --spt "$spt" --sides "$sides" --quiet)
    echo "$out" | sed "s/^/  /"
    echo "$out" | grep -q "platform=\['Atari ST'\]" || { echo "  FAIL: platform"; FAIL=1; }
+   python3 "$HERE/ipfconsist.py" "${name}_out.IPF" > /dev/null || { echo "  FAIL: ${name}_out.IPF block / track sizes inconsistent"; python3 "$HERE/ipfconsist.py" "${name}_out.IPF" | sed "s/^/  /"; FAIL=1; }
    for pat in "$@"; do
       echo "$out" | grep -q -- "$pat" || { echo "  FAIL: expected '$pat'"; FAIL=1; }
    done
