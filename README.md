@@ -148,6 +148,11 @@ HFE and SCP made from an IPF keep the protection.
 
 Tests/AtariST contains a flux generator for synthetic ST disks and an IPF checker based on the SPS
 capsimage library, hfecheck.py which decodes HFE v1/v3 the way FlashFloppy does, and run_tests.sh.
+ipfconsist.py checks that an IPF's block and track sizes add up the way strict readers expect (Aufit
+reports "IPF File Error: inconsistent track content" otherwise) : track bytes = each block rounded up to
+whole bytes, and weak data in bit-sized blocks counted in data bits (2 cells each). IPFs written by
+SugarConvDsk before commit 48daf8a can break both rules ; ipfrepair.py IN OUT corrects them without
+converting again.
 
 Compilation
 =
