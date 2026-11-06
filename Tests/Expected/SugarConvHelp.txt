@@ -15,6 +15,9 @@ Usage : SugarConvDsk source [destination] [-s=side] [-p=platform] [-second=side_
     -ipfraw : Write IPF tracks with the original, larger encoding (MFM cells instead of decoded bytes).
        By default sectors are stored as decoded bytes with generated gaps, like SPS images (about half the size).
 
+    -ipfuserid=N : Creator id written in the IPF INFO record (default 80). The INFO record also gets
+       the creation date and time, and the CRC32 of the source dump as its origin.
+
     -speedlock10 : Encode Atari ST Speedlock density keys with IPF type 6 (+10% / -10% patches).
        By default type 7 is used (+5% slow patch, as measured on the original disks), which some games need.
 

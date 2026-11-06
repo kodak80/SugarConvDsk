@@ -341,6 +341,10 @@ public:
    int SmartOpen(FILE** file, const char* file_path, const char* file_ext);
 private:
    std::string current_disk_path_;
+public:
+   // File the disk was loaded from (set by DiskBuilder) : its CRC32 goes in the IPF INFO "origin".
+   // Last member, and a char array : CAPSFile.h leaks #pragma pack(4) into some source files.
+   char source_path_[1024] = {0};
 };
 
 
