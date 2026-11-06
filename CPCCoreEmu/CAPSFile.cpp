@@ -1,4 +1,10 @@
 #include "stdafx.h"
+// before CAPSFile.h, which leaves #pragma pack(4) active (std::regex breaks under it)
+#include <ctime>
+#include <chrono>
+#include <regex>
+#include <filesystem>
+#include "zlib.h"
 #include "CAPSFile.h"
 #include <algorithm>
 #include <vector>
@@ -1255,6 +1261,47 @@ int CAPSFile::ExtractTrack(IDisk* disk, unsigned char* buffer, int track_buf_siz
    return 0;
 }
 
+// CRC32 of the dump an image was made from (IPF INFO "origin", as SPS images record the CRC32 of
+// their CT-RAW file). A KryoFlux stream set counts as all its track files, in name order.
+static unsigned int SourceCrc32(const std::string& path)
+{
+   namespace sfs = std::filesystem;
+   if (path.empty()) return 0;
+   std::vector<sfs::path> files;
+   std::error_code ec;
+   const sfs::path p(path);
+   static const std::regex kf("^(.*?)(\\d{2,3})\\.([01])\\.raw$", std::regex::icase);
+   std::smatch m;
+   const std::string name = p.filename().string();
+   if (std::regex_match(name, m, kf))
+   {
+      const std::string prefix = m[1].str();
+      for (auto& e : sfs::directory_iterator(p.parent_path().empty() ? sfs::path(".") : p.parent_path(), ec))
+      {
+         std::smatch m2;
+         const std::string n = e.path().filename().string();
+         if (std::regex_match(n, m2, kf) && m2[1].str() == prefix) files.push_back(e.path());
+      }
+      std::sort(files.begin(), files.end());
+   }
+   else
+   {
+      files.push_back(p);
+   }
+   uLong crc = crc32(0L, Z_NULL, 0);
+   std::vector<unsigned char> buf(1 << 20);
+   bool any = false;
+   for (const auto& f : files)
+   {
+      FILE* fh = nullptr;
+      if (fopen_s(&fh, f.string().c_str(), "rb") != 0 || fh == nullptr) continue;
+      size_t n;
+      while ((n = fread(buf.data(), 1, buf.size(), fh)) > 0) { crc = crc32(crc, buf.data(), static_cast<uInt>(n)); any = true; }
+      fclose(fh);
+   }
+   return any ? static_cast<unsigned int>(crc) : 0;
+}
+
 int CAPSFile::CreateIpf(IDisk* disk)
 {
    // Clear values
@@ -1281,20 +1328,33 @@ int CAPSFile::CreateIpf(IDisk* disk)
    caps_info_.media_type = 1;
    caps_info_.encoder_type = 2;
    caps_info_.encoder_rev = 1;
-   caps_info_.file_key = 0;
-   caps_info_.file_rev = 1;
-   caps_info_.origin_crc32 = 0; // TODO ??
+   // release / revision as in SPS images (release 1, revision 0)
+   caps_info_.file_key = 1;
+   caps_info_.file_rev = 0;
+   caps_info_.origin_crc32 = SourceCrc32(disk->source_path_);
    caps_info_.track_min = 0;
    caps_info_.side_min = 0;
    // Single-sided ST dumps are common : record the real side count
    const int nb_sides_out = (disk->nb_sides_ >= 2 && disk->side_[1].nb_tracks > 0) ? 2 : 1;
    const bool atari_st = (disk->GetPlatform() == IDisk::PLATFORM_ATARI_ST);
    caps_info_.side_max = atari_st ? (nb_sides_out - 1) : 1; // CPC : keep historical behaviour (always 2 sides)
-   caps_info_.creation_date = 0; // TODO
-   caps_info_.creation_time = 0; // TODO
+   {
+      // creation date YYYYMMDD and time HHMMSSmmm (local time), as SPS images store them
+      const auto now = std::chrono::system_clock::now();
+      const std::time_t t = std::chrono::system_clock::to_time_t(now);
+      const int ms = static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000);
+      std::tm lt{};
+#ifdef _WIN32
+      localtime_s(&lt, &t);
+#else
+      localtime_r(&t, &lt);
+#endif
+      caps_info_.creation_date = (lt.tm_year + 1900) * 10000 + (lt.tm_mon + 1) * 100 + lt.tm_mday;
+      caps_info_.creation_time = ((lt.tm_hour * 100 + lt.tm_min) * 100 + lt.tm_sec) * 1000 + ms;
+   }
    caps_info_.platform_1 = atari_st ? 2 : 4; // IPF platform IDs : 2 = Atari ST, 4 = Amstrad CPC
    caps_info_.disk_number = 0;
-   caps_info_.creator_id = 0; // TODO
+   caps_info_.creator_id = creator_id_;
 
    // Unset unformatted tracks at the end
 
@@ -1750,6 +1810,7 @@ bool CAPSFile::AddStreamRecord(StreamRecording* record, unsigned char* buffer, u
 
 bool CAPSFile::compact_ = true;
 int CAPSFile::speedlock_density_ = 7;
+unsigned int CAPSFile::creator_id_ = 80;
 
 static void AppendBytes(unsigned char*& rbuf, unsigned int& rsize, unsigned int& roff, const std::vector<unsigned char>& bytes)
 {

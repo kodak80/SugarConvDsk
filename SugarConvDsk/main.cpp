@@ -381,6 +381,9 @@ void PrintUsage()
    printf("    -ipfraw : Write IPF tracks with the original, larger encoding (MFM cells instead of decoded bytes).\n");
    printf("       By default sectors are stored as decoded bytes with generated gaps, like SPS images (about half the size).\n");
    printf("\n");
+   printf("    -ipfuserid=N : Creator id written in the IPF INFO record (default 80). The INFO record also gets\n");
+   printf("       the creation date and time, and the CRC32 of the source dump as its origin.\n");
+   printf("\n");
    printf("    -speedlock10 : Encode Atari ST Speedlock density keys with IPF type 6 (+10%% / -10%% patches).\n");
    printf("       By default type 7 is used (+5%% slow patch, as measured on the original disks), which some games need.\n");
    printf("\n");
@@ -464,6 +467,10 @@ int main(int argc, char** argv)
          else if (stricmp(argv[i], "-speedlock10") == 0)
          {
             CAPSFile::speedlock_density_ = 6;
+         }
+         else if (strnicmp(argv[i], "-ipfuserid=", 11) == 0)
+         {
+            CAPSFile::creator_id_ = static_cast<unsigned int>(strtoul(argv[i] + 11, nullptr, 10));
          }
          else if (stricmp(argv[i], "-scpnoflux") == 0)
          {
