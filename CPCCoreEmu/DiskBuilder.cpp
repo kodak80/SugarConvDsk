@@ -80,7 +80,10 @@ int DiskBuilder::LoadDisk(const char* file_path, IDisk*& created_disk, ILoadingP
    {
       if ((*it)->CanLoad(file_path))
       {
-         return (*it)->LoadDisk(file_path, created_disk, loading_progress);
+         const int res = (*it)->LoadDisk(file_path, created_disk, loading_progress);
+         if (res == 0 && created_disk != nullptr)
+            snprintf(created_disk->source_path_, sizeof(created_disk->source_path_), "%s", file_path);
+         return res;
       }
    }
 

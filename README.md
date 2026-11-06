@@ -139,6 +139,11 @@ decoding.
 IPF sources with density protections (Copylock ST, Speedlock) are given back their timing when read, so
 HFE and SCP made from an IPF keep the protection.
 
+IPF INFO record : SugarConvDsk fills it like SPS images do - release 1 revision 0, the creation date and
+time, the CRC32 of the source dump as "origin" (the file for SCP / CT-RAW / HFE / IPF sources, all the
+track files in name order for a KryoFlux set) and a creator id, 80 by default (-ipfuserid=N to change
+it). SPS's own images carry their creator's id (5 on the ones checked) and the CRC32 of their CT-RAW.
+
 Tests/AtariST contains a flux generator for synthetic ST disks and an IPF checker based on the SPS
 capsimage library, hfecheck.py which decodes HFE v1/v3 the way FlashFloppy does, and run_tests.sh.
 ipfconsist.py checks that an IPF's block and track sizes add up the way strict readers expect (Aufit
