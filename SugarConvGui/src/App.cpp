@@ -99,6 +99,7 @@ void App::RegisterSettings()
       else if (sscanf(line, "IpfRaw=%d", &v) == 1) o.ipf_raw = v != 0;
       else if (sscanf(line, "ScpNoFlux=%d", &v) == 1) o.scp_noflux = v != 0;
       else if (sscanf(line, "HfeV1=%d", &v) == 1) o.hfe_v1 = v != 0;
+      else if (sscanf(line, "IpfUserId=%d", &v) == 1) o.ipf_userid = std::clamp(v, 0, 0x7fffffff);
       else if (sscanf(line, "NextToSource=%d", &v) == 1) o.output_next_to_source = v != 0;
       else if (sscanf(line, "Recursive=%d", &v) == 1) o.recursive = v != 0;
       else if (strncmp(line, "OutputDir=", 10) == 0)
@@ -120,6 +121,7 @@ void App::RegisterSettings()
       out->appendf("[%s][Options]\n", handler->TypeName);
       out->appendf("Format=%d\nPlatform=%d\nSides=%d\nSpeedlock10=%d\nIpfRaw=%d\nScpNoFlux=%d\nHfeV1=%d\n",
                    static_cast<int>(o.format), o.platform, o.sides, o.speedlock10, o.ipf_raw, o.scp_noflux, o.hfe_v1);
+      out->appendf("IpfUserId=%d\n", o.ipf_userid);
       out->appendf("NextToSource=%d\nRecursive=%d\nOutputDir=%s\nFilter=%s\n\n", o.output_next_to_source, o.recursive,
                    o.output_dir.c_str(), o.filter.c_str());
    };
@@ -204,9 +206,10 @@ void App::Frame()
 
    // save the options when they change
    char sig[1024];
-   snprintf(sig, sizeof(sig), "%d%d%d%d%d%d%d%d%d|%s|%s", static_cast<int>(options_.format), options_.platform,
+   snprintf(sig, sizeof(sig), "%d%d%d%d%d%d%d%d%d|%d|%s|%s", static_cast<int>(options_.format), options_.platform,
             options_.sides, options_.speedlock10, options_.ipf_raw, options_.scp_noflux, options_.hfe_v1,
-            options_.output_next_to_source, options_.recursive, options_.output_dir.c_str(), options_.filter.c_str());
+            options_.output_next_to_source, options_.recursive, options_.ipf_userid, options_.output_dir.c_str(),
+            options_.filter.c_str());
    if (options_sig_ != sig)
    {
       if (!options_sig_.empty()) ImGui::MarkIniSettingsDirty();
@@ -367,6 +370,11 @@ void App::DrawOptions()
    ImGui::Checkbox("IPF: raw cells (larger)", &options_.ipf_raw);
    HelpMarker("Stores every track as MFM cells, like older SugarConvDsk versions. Off (default): sectors are stored "
               "as decoded bytes with generated gaps, like SPS images, about half the size.");
+   ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+   ImGui::InputInt("IPF creator id", &options_.ipf_userid, 1, 10);
+   if (options_.ipf_userid < 0) options_.ipf_userid = 0;
+   HelpMarker("Written in each IPF's INFO record (the \"user id of the image creator\"), with the creation date and "
+              "time and the CRC32 of the source dump. Default 80. SPS's own images carry their creator's id.");
    ImGui::EndDisabled();
    ImGui::BeginDisabled(options_.format != OutFormat::SCP);
    ImGui::Checkbox("SCP: weak bits as no-flux gaps", &options_.scp_noflux);

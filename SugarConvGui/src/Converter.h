@@ -34,6 +34,7 @@ struct Options
    bool ipf_raw = false;      // old IPF encoding (MFM cells instead of decoded bytes)
    bool scp_noflux = false;   // SCP: weak areas as no-flux gaps (for writing to a real disk)
    bool hfe_v1 = false;       // HFE: original v1 format instead of v3
+   int ipf_userid = 80;       // IPF: creator id in the INFO record
    bool output_next_to_source = true;
    std::string output_dir;    // used when output_next_to_source is false
    bool recursive = true;     // folder scan

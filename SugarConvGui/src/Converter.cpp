@@ -615,6 +615,7 @@ void Converter::RunJob(int id, const Options& options, bool analyse_only)
    CAPSFile::speedlock_density_ = options.speedlock10 ? 6 : 7;
    FormatTypeSCP::weak_as_noflux_ = options.scp_noflux;
    FormatTypeHFE::write_v1_ = options.hfe_v1;
+   CAPSFile::creator_id_ = static_cast<unsigned int>(options.ipf_userid < 0 ? 0 : options.ipf_userid);
 
    bool ok = false;
    std::string message, output;
